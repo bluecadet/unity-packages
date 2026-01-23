@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: ed757819a131f46a1ae00eaa667a2623
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_ActionsAsset: {fileID: -944628639613478452, guid: 0578604f98e2b4b349cfe9e80ca89749, type: 3}
+  - m_PointAction: {fileID: -1654692200621890270, guid: 0578604f98e2b4b349cfe9e80ca89749, type: 3}
+  - m_ClickAction: {fileID: 3001919216989983466, guid: 0578604f98e2b4b349cfe9e80ca89749, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
