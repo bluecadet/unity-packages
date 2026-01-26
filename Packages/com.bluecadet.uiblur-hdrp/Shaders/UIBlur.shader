@@ -60,6 +60,11 @@ Shader "Bluecadet/UIBlur/UIBlurHDRP"
             {
                 // Compute screen UV from clip space position
                 float2 screenUV = IN.positionCS.xy * _ScreenSize.zw;
+                
+                // Flip Y coordinate for HDRP
+                #if UNITY_UV_STARTS_AT_TOP
+                screenUV.y = 1.0 - screenUV.y;
+                #endif
 
                 half4 blurSample = SAMPLE_TEXTURE2D_X(_UIBlurTexture, sampler_UIBlurTexture, screenUV);
 
