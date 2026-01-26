@@ -17,10 +17,10 @@ namespace Bluecadet.UIBlur
     // Shader pass indices
     private const int PASS_DOWNSAMPLE = 0;
     private const int PASS_UPSAMPLE = 1;
+    private const int MAX_PASSES = 6;
 
     // Configuration
     private float blurScale;
-    private int blurPasses;
     private string renderTextureName;
     private int renderTextureId;
     private float resolutionScale;
@@ -30,10 +30,9 @@ namespace Bluecadet.UIBlur
       blurMaterial = material;
     }
 
-    public void Setup(float scale, int passes, string textureName, float resScale)
+    public void Setup(float scale, string textureName, float resScale)
     {
       blurScale = scale;
-      blurPasses = Mathf.Clamp(passes, 1, 10);
       renderTextureName = textureName;
       renderTextureId = Shader.PropertyToID(textureName);
       resolutionScale = Mathf.Clamp(resScale, 0.1f, 1f);
@@ -88,8 +87,8 @@ namespace Bluecadet.UIBlur
       const float maxOffset = 2.0f;
 
       // Find minimum pass count where offset stays within quality range
-      int actualPasses = blurPasses;
-      for (int n = 1; n <= blurPasses; n++)
+      int actualPasses = MAX_PASSES;
+      for (int n = 1; n <= MAX_PASSES; n++)
       {
         float neededOffset = blurScale / Mathf.Pow(2f, n);
         if (neededOffset <= maxOffset)

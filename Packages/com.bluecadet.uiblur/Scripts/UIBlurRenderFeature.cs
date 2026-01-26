@@ -11,10 +11,6 @@ namespace Bluecadet.UIBlur {
     [Tooltip("Blur scale - higher values produce stronger blur")]
     public float blurScale = 4f;
 
-    [Range(2, 6)]
-    [Tooltip("Number of blur passes - more passes = smoother blur but more expensive")]
-    public int blurPasses = 3;
-
     [Header("Render Configuration")]
     [Tooltip("Name of the global RenderTexture that UI shaders can sample")]
     public string renderTextureName = "_UIBlurTexture";
@@ -29,6 +25,11 @@ namespace Bluecadet.UIBlur {
 
     [SerializeField]
     private BlurSettings settings = new BlurSettings();
+
+    public float BlurScale {
+      get => settings.blurScale;
+      set => settings.blurScale = value;
+    }
 
     [SerializeField]
     public RenderPassEvent renderPassEvent = RenderPassEvent.AfterRenderingTransparents;
@@ -71,7 +72,6 @@ namespace Bluecadet.UIBlur {
       // Configure the render pass with current settings
       renderPass.Setup(
         settings.blurScale,
-        settings.blurPasses,
         settings.renderTextureName,
         settings.resolutionScale
       );
