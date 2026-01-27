@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
@@ -119,6 +120,46 @@ namespace Bluecadet.Utils {
             File.WriteAllText(filePath, ToJson(currentSettings));
         }
 
+        /// Reads the existing base file (or defaults), merges only the fields at the
+        /// given dot-separated leaf paths from currentSettings, and writes back.
+        public void SaveDirtyToBaseFile(IEnumerable<string> dirtyPaths) {
+            string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            JObject baseObj;
+            if (File.Exists(filePath)) {
+                baseObj = JObject.Parse(File.ReadAllText(filePath));
+            } else {
+                baseObj = ToJObject(new AppSettings());
+            }
+
+            JObject currentObj = ToJObject(currentSettings);
+            foreach (string path in dirtyPaths) {
+                string[] parts = path.Split('.');
+                SetNestedValue(baseObj, currentObj, parts, 0);
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+            File.WriteAllText(filePath, baseObj.ToString(Newtonsoft.Json.Formatting.Indented));
+        }
+
+        /// Copies a value at the given key path from source into target,
+        /// creating intermediate objects as needed.
+        private static void SetNestedValue(JObject target, JObject source, string[] parts, int index) {
+            string key = parts[index];
+            if (index == parts.Length - 1) {
+                // Leaf — copy value
+                JToken val = source[key];
+                if (val != null)
+                    target[key] = val.DeepClone();
+            } else {
+                // Intermediate — ensure object exists and recurse
+                if (target[key] == null || target[key].Type != JTokenType.Object)
+                    target[key] = new JObject();
+                JObject srcChild = source[key] as JObject;
+                if (srcChild != null)
+                    SetNestedValue((JObject)target[key], srcChild, parts, index + 1);
+            }
+        }
+
         /// Diffs current settings against the base file and writes only the differences
         /// to the local file. Deletes the local file if there are no differences.
         public void SaveToLocalFile() {
@@ -137,6 +178,9 @@ namespace Bluecadet.Utils {
             if (diff.Count == 0) {
                 if (File.Exists(localPath)) {
                     File.Delete(localPath);
+                }
+                if (File.Exists(localPath + ".meta")) {
+                    File.Delete(localPath + ".meta");
                 }
             } else {
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath));
