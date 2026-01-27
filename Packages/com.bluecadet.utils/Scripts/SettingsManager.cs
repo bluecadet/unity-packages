@@ -52,7 +52,9 @@ namespace Bluecadet.Utils {
         [NonSerialized]
         public TSettings currentSettings = new();
 
-        /// Converts settings to/from JSON using JsonUtility (which handles Unity types correctly).
+
+#if UNITY_EDITOR
+        /// Converts settings to JSON using JsonUtility (which handles Unity types correctly).
         private static string ToJson(TSettings settings) {
             return JsonUtility.ToJson(settings, true);
         }
@@ -60,6 +62,7 @@ namespace Bluecadet.Utils {
         private static JObject ToJObject(TSettings settings) {
             return JObject.Parse(ToJson(settings));
         }
+#endif
 
         void Start() {
             LoadFromFile();
@@ -108,10 +111,12 @@ namespace Bluecadet.Utils {
             }
             catch (Exception ex) {
                 Debug.LogException(ex);
-                Debug.LogWarning("Unable to load settings. Creating new settings object and saving to file.");
+                Debug.LogWarning("Unable to load settings. Using defaults.");
 
                 currentSettings = new TSettings();
+#if UNITY_EDITOR
                 SaveToBaseFile();
+#endif
             }
             finally {
                 ApplyGeneralSettings();
@@ -119,6 +124,7 @@ namespace Bluecadet.Utils {
             }
         }
 
+#if UNITY_EDITOR
         /// Writes the full current settings to the base file.
         /// Since all fields are saved to base, the local file is deleted.
         public void SaveToBaseFile() {
@@ -277,6 +283,7 @@ namespace Bluecadet.Utils {
             foreach (var key in toRemove)
                 obj.Remove(key);
         }
+#endif
 
         void BroadcastSettingsLoaded() {
             OnSettingsLoaded?.Invoke(currentSettings);
