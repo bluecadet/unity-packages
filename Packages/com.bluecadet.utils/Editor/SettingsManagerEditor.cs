@@ -120,19 +120,19 @@ public class SettingsManagerEditor : Editor
 
         if (GUILayout.Button("Save to Base File"))
         {
-            ((Component)target).SendMessage("SaveToBaseFile", null, SendMessageOptions.DontRequireReceiver);
+            InvokeMethod("SaveToBaseFile", new HashSet<string>(_dirtyPaths));
             _dirtyPaths.Clear();
         }
 
         if (GUILayout.Button("Save to Local File"))
         {
-            ((Component)target).SendMessage("SaveToLocalFile", null, SendMessageOptions.DontRequireReceiver);
+            InvokeMethod("SaveToLocalFile");
             _dirtyPaths.Clear();
         }
 
         if (GUILayout.Button("Load from File(s)"))
         {
-            ((Component)target).SendMessage("LoadFromFile", null, SendMessageOptions.DontRequireReceiver);
+            InvokeMethod("LoadFromFile");
             _dirtyPaths.Clear();
         }
 
@@ -140,10 +140,17 @@ public class SettingsManagerEditor : Editor
 
         if (GUILayout.Button("Broadcast Settings Loaded"))
         {
-            ((Component)target).SendMessage("BroadcastSettingsLoaded", null, SendMessageOptions.DontRequireReceiver);
+            InvokeMethod("BroadcastSettingsLoaded");
         }
 
         EditorGUI.EndDisabledGroup();
+    }
+
+    private void InvokeMethod(string name, params object[] args)
+    {
+        var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var method = target.GetType().GetMethod(name, flags);
+        method?.Invoke(target, args.Length > 0 ? args : null);
     }
 
     private void CollectLocalOverridePaths(string localFileName)

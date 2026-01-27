@@ -115,7 +115,7 @@ namespace Bluecadet.Utils {
 
                 currentSettings = new TSettings();
 #if UNITY_EDITOR
-                SaveToBaseFile();
+                SaveDefaultsToBaseFile();
 #endif
             }
             finally {
@@ -125,19 +125,28 @@ namespace Bluecadet.Utils {
         }
 
 #if UNITY_EDITOR
-        /// Writes the full current settings to the base file.
-        /// Since all fields are saved to base, the local file is deleted.
-        public void SaveToBaseFile() {
+        /// Writes default settings to the base file. Used when no file exists yet.
+        private void SaveDefaultsToBaseFile() {
             string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
             Directory.CreateDirectory(Path.GetDirectoryName(filePath));
-            File.WriteAllText(filePath, ToJson(currentSettings));
-            DeleteLocalFile();
+            File.WriteAllText(filePath, ToJson(new TSettings()));
         }
 
-        /// Reads the existing base file (or defaults), merges only the fields at the
-        /// given dot-separated leaf paths from currentSettings, and writes back.
-        public void SaveDirtyToBaseFile(IEnumerable<string> dirtyPaths) {
+        /// Writes only the given dirty fields to the base file.
+        /// If a dirty field overlaps with a local override, it is removed from the local file.
+        /// If no fields are dirty and no base file exists, saves defaults.
+        public void SaveToBaseFile(IEnumerable<string> dirtyPaths) {
             string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            bool hasDirty = false;
+            foreach (var _ in dirtyPaths) { hasDirty = true; break; }
+
+            if (!hasDirty) {
+                if (!File.Exists(filePath)) {
+                    SaveDefaultsToBaseFile();
+                }
+                return;
+            }
+
             JObject baseObj;
             if (File.Exists(filePath)) {
                 baseObj = JObject.Parse(File.ReadAllText(filePath));
