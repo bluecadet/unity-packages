@@ -104,7 +104,7 @@ public class SettingsManagerEditor : Editor
             CaptureCleanSnapshot(manager);
         }
 
-        if (GUILayout.Button("Load from File"))
+        if (GUILayout.Button("Load from File(s)"))
         {
             manager.LoadFromFile();
             CaptureCleanSnapshot(manager);
