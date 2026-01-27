@@ -10,7 +10,7 @@ using UnityEngine.InputSystem;
 namespace Bluecadet.Utils {
 
     [Serializable]
-    public partial class AppSettings {
+    public class AppSettings {
 
         [Serializable]
         public class GeneralSettings {
@@ -24,13 +24,19 @@ namespace Bluecadet.Utils {
         public GeneralSettings general = new();
     }
 
+    /// Non-generic base class so the custom editor can target all SettingsManager<> variants.
     [ExecuteInEditMode]
-    public class SettingsManager : Singleton<SettingsManager> {
-        public event Action<AppSettings> OnSettingsLoaded;
+    public abstract class SettingsManagerBase : Singleton<SettingsManagerBase> { }
 
-        public static AppSettings Settings {
+    [ExecuteInEditMode]
+    public abstract class SettingsManager<TSettings> : SettingsManagerBase
+        where TSettings : AppSettings, new()
+    {
+        public event Action<TSettings> OnSettingsLoaded;
+
+        public static TSettings Settings {
             get {
-                return Get().currentSettings;
+                return ((SettingsManager<TSettings>)Get()).currentSettings;
             }
         }
 
@@ -44,14 +50,14 @@ namespace Bluecadet.Utils {
         // Always populated at runtime via LoadFromFile().
         // Drawn in the inspector via SettingsManagerEditor using a temporary ScriptableObject wrapper.
         [NonSerialized]
-        public AppSettings currentSettings = new();
+        public TSettings currentSettings = new();
 
-        /// Converts AppSettings to/from JSON using JsonUtility (which handles Unity types correctly).
-        private static string ToJson(AppSettings settings) {
+        /// Converts settings to/from JSON using JsonUtility (which handles Unity types correctly).
+        private static string ToJson(TSettings settings) {
             return JsonUtility.ToJson(settings, true);
         }
 
-        private static JObject ToJObject(AppSettings settings) {
+        private static JObject ToJObject(TSettings settings) {
             return JObject.Parse(ToJson(settings));
         }
 
@@ -98,13 +104,13 @@ namespace Bluecadet.Utils {
                     });
                 }
 
-                currentSettings = JsonUtility.FromJson<AppSettings>(baseObj.ToString());
+                currentSettings = JsonUtility.FromJson<TSettings>(baseObj.ToString());
             }
             catch (Exception ex) {
                 Debug.LogException(ex);
                 Debug.LogWarning("Unable to load settings. Creating new settings object and saving to file.");
 
-                currentSettings = new AppSettings();
+                currentSettings = new TSettings();
                 SaveToBaseFile();
             }
             finally {
@@ -128,7 +134,7 @@ namespace Bluecadet.Utils {
             if (File.Exists(filePath)) {
                 baseObj = JObject.Parse(File.ReadAllText(filePath));
             } else {
-                baseObj = ToJObject(new AppSettings());
+                baseObj = ToJObject(new TSettings());
             }
 
             JObject currentObj = ToJObject(currentSettings);
@@ -168,7 +174,7 @@ namespace Bluecadet.Utils {
             if (File.Exists(basePath)) {
                 baseObj = JObject.Parse(File.ReadAllText(basePath));
             } else {
-                baseObj = ToJObject(new AppSettings());
+                baseObj = ToJObject(new TSettings());
             }
 
             JObject currentObj = ToJObject(currentSettings);
@@ -218,4 +224,8 @@ namespace Bluecadet.Utils {
             Cursor.visible = s.showCursor;
         }
     }
+
+    /// Default concrete SettingsManager using the base AppSettings.
+    /// Subclass SettingsManager<TSettings> with your own AppSettings subclass for custom fields.
+    public class SettingsManager : SettingsManager<AppSettings> { }
 }

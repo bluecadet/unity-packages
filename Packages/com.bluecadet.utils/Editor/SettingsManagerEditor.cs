@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
@@ -5,13 +6,14 @@ using UnityEditor;
 using Bluecadet.Utils;
 using Newtonsoft.Json.Linq;
 
-[CustomEditor(typeof(SettingsManager))]
+[CustomEditor(typeof(SettingsManagerBase), true)]
 [CanEditMultipleObjects]
 public class SettingsManagerEditor : Editor
 {
     private class SettingsWrapper : ScriptableObject
     {
-        public AppSettings settings = new();
+        [SerializeReference]
+        public AppSettings settings;
     }
 
     private SettingsWrapper _wrapper;
@@ -20,11 +22,26 @@ public class SettingsManagerEditor : Editor
     private HashSet<string> _dirtyPaths = new();
     private JObject _cleanSnapshot;
 
+    private Type _settingsType;
+
     private static readonly Color OverrideTint = new Color(0.5f, 0.85f, 1f, 1f);
     private static readonly Color DirtyTint = new Color(1f, 0.9f, 0.6f, 1f);
 
     void OnEnable()
     {
+        // Walk up the generic hierarchy to find SettingsManager<TSettings> and extract TSettings
+        _settingsType = typeof(AppSettings);
+        Type t = target.GetType();
+        while (t != null)
+        {
+            if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(SettingsManager<>))
+            {
+                _settingsType = t.GetGenericArguments()[0];
+                break;
+            }
+            t = t.BaseType;
+        }
+
         _wrapper = ScriptableObject.CreateInstance<SettingsWrapper>();
         _wrapper.hideFlags = HideFlags.DontSave;
     }
@@ -35,10 +52,23 @@ public class SettingsManagerEditor : Editor
             DestroyImmediate(_wrapper);
     }
 
+    private object GetCurrentSettings()
+    {
+        // Use the public currentSettings field from SettingsManager<TSettings>
+        var field = target.GetType().GetField("currentSettings",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        return field?.GetValue(target);
+    }
+
+    private void SetCurrentSettings(AppSettings value)
+    {
+        var field = target.GetType().GetField("currentSettings",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        field?.SetValue(target, value);
+    }
+
     public override void OnInspectorGUI()
     {
-        var manager = (SettingsManager)target;
-
         // Draw the file name fields via the real serialized object
         serializedObject.Update();
         EditorGUILayout.PropertyField(serializedObject.FindProperty("baseFileName"));
@@ -49,10 +79,11 @@ public class SettingsManagerEditor : Editor
         CollectLocalOverridePaths(serializedObject.FindProperty("localFileName").stringValue);
 
         // Collect dirty paths (current vs on-disk snapshot)
-        CollectDirtyPaths(manager);
+        CollectDirtyPaths();
 
         // Draw currentSettings via the wrapper
-        _wrapper.settings = manager.currentSettings;
+        var currentSettings = (AppSettings)GetCurrentSettings();
+        _wrapper.settings = currentSettings;
         _wrapperSO = new SerializedObject(_wrapper);
 
         var settingsProp = _wrapperSO.FindProperty("settings");
@@ -69,7 +100,7 @@ public class SettingsManagerEditor : Editor
         if (EditorGUI.EndChangeCheck())
         {
             _wrapperSO.ApplyModifiedPropertiesWithoutUndo();
-            manager.currentSettings = _wrapper.settings;
+            SetCurrentSettings(_wrapper.settings);
         }
 
         // Legend
@@ -94,54 +125,59 @@ public class SettingsManagerEditor : Editor
 
         if (GUILayout.Button("Save to Base File"))
         {
-            manager.SaveToBaseFile();
-            CaptureCleanSnapshot(manager);
+            ((Component)target).SendMessage("SaveToBaseFile", null, SendMessageOptions.DontRequireReceiver);
+            CaptureCleanSnapshot();
         }
 
         if (GUILayout.Button("Save to Local File"))
         {
-            manager.SaveToLocalFile();
-            CaptureCleanSnapshot(manager);
+            ((Component)target).SendMessage("SaveToLocalFile", null, SendMessageOptions.DontRequireReceiver);
+            CaptureCleanSnapshot();
         }
 
         if (GUILayout.Button("Load from File(s)"))
         {
-            manager.LoadFromFile();
-            CaptureCleanSnapshot(manager);
+            ((Component)target).SendMessage("LoadFromFile", null, SendMessageOptions.DontRequireReceiver);
+            CaptureCleanSnapshot();
         }
 
         EditorGUI.BeginDisabledGroup(!Application.isPlaying);
 
         if (GUILayout.Button("Broadcast Settings Loaded"))
         {
-            manager.SendMessage("BroadcastSettingsLoaded", null, SendMessageOptions.DontRequireReceiver);
+            ((Component)target).SendMessage("BroadcastSettingsLoaded", null, SendMessageOptions.DontRequireReceiver);
         }
 
         EditorGUI.EndDisabledGroup();
     }
 
-    private void CaptureCleanSnapshot(SettingsManager manager)
+    private string SettingsToJson()
     {
-        _cleanSnapshot = JObject.Parse(JsonUtility.ToJson(manager.currentSettings));
+        var settings = GetCurrentSettings();
+        return JsonUtility.ToJson(settings);
     }
 
-    private void CollectDirtyPaths(SettingsManager manager)
+    private void CaptureCleanSnapshot()
+    {
+        _cleanSnapshot = JObject.Parse(SettingsToJson());
+    }
+
+    private void CollectDirtyPaths()
     {
         _dirtyPaths.Clear();
 
         if (_cleanSnapshot == null)
         {
-            // First time: read merged on-disk state as the clean baseline
-            CaptureCleanSnapshotFromDisk(manager);
+            CaptureCleanSnapshotFromDisk();
         }
 
         if (_cleanSnapshot == null) return;
 
-        JObject current = JObject.Parse(JsonUtility.ToJson(manager.currentSettings));
+        JObject current = JObject.Parse(SettingsToJson());
         CollectDiffLeaves(_cleanSnapshot, current, "", _dirtyPaths);
     }
 
-    private void CaptureCleanSnapshotFromDisk(SettingsManager manager)
+    private void CaptureCleanSnapshotFromDisk()
     {
         try
         {
@@ -169,8 +205,7 @@ public class SettingsManagerEditor : Editor
         }
         catch
         {
-            // Fall back to current settings as snapshot
-            _cleanSnapshot = JObject.Parse(JsonUtility.ToJson(manager.currentSettings));
+            _cleanSnapshot = JObject.Parse(SettingsToJson());
         }
     }
 
@@ -183,7 +218,6 @@ public class SettingsManagerEditor : Editor
 
             if (baseVal == null)
             {
-                // New property — mark all leaves as dirty
                 if (prop.Value.Type == JTokenType.Object)
                     FlattenAllLeaves((JObject)prop.Value, path, paths);
                 else
@@ -265,7 +299,6 @@ public class SettingsManagerEditor : Editor
 
             if (!hasChildren)
             {
-                // Dirty takes priority over override
                 if (isDirty)
                     GUI.backgroundColor = DirtyTint;
                 else if (isOverridden)
@@ -274,7 +307,6 @@ public class SettingsManagerEditor : Editor
 
             if (hasChildren)
             {
-                // Check if any descendant is overridden or dirty to tint the foldout
                 Color? foldoutTint = null;
                 string prefix = jsonPath + ".";
                 foreach (var p in _dirtyPaths)
