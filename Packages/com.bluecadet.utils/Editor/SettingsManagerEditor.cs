@@ -35,9 +35,10 @@ public class SettingsManagerEditor : Editor
     {
         var manager = (SettingsManager)target;
 
-        // Draw the fileName field via the real serialized object
+        // Draw the file name fields via the real serialized object
         serializedObject.Update();
-        EditorGUILayout.PropertyField(serializedObject.FindProperty("fileName"));
+        EditorGUILayout.PropertyField(serializedObject.FindProperty("baseFileName"));
+        EditorGUILayout.PropertyField(serializedObject.FindProperty("localFileName"));
         serializedObject.ApplyModifiedProperties();
 
         // Draw currentSettings via the wrapper
@@ -55,14 +56,19 @@ public class SettingsManagerEditor : Editor
 
         EditorGUILayout.Space();
 
-        if (GUILayout.Button("Save to File"))
+        if (GUILayout.Button("Save to Base File"))
         {
-            manager.SendMessage("SaveToFile", null, SendMessageOptions.DontRequireReceiver);
+            manager.SaveToBaseFile();
+        }
+
+        if (GUILayout.Button("Save to Local File"))
+        {
+            manager.SaveToLocalFile();
         }
 
         if (GUILayout.Button("Load from File"))
         {
-            manager.SendMessage("LoadFromFile", null, SendMessageOptions.DontRequireReceiver);
+            manager.LoadFromFile();
         }
 
         EditorGUI.BeginDisabledGroup(!Application.isPlaying);

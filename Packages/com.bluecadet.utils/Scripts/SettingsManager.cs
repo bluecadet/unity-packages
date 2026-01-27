@@ -1,7 +1,7 @@
 using System;
-
 using System.IO;
 using UnityEngine;
+using Newtonsoft.Json.Linq;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -34,13 +34,25 @@ namespace Bluecadet.Utils {
         }
 
         [SerializeField]
-        private string fileName = "settings.json";
+        private string baseFileName = "settings.json";
+
+        [SerializeField]
+        private string localFileName = "settings.local.json";
 
         // NonSerialized so settings aren't baked into the scene/prefab.
         // Always populated at runtime via LoadFromFile().
         // Drawn in the inspector via SettingsManagerEditor using a temporary ScriptableObject wrapper.
         [NonSerialized]
         public AppSettings currentSettings = new();
+
+        /// Converts AppSettings to/from JSON using JsonUtility (which handles Unity types correctly).
+        private static string ToJson(AppSettings settings) {
+            return JsonUtility.ToJson(settings, true);
+        }
+
+        private static JObject ToJObject(AppSettings settings) {
+            return JObject.Parse(ToJson(settings));
+        }
 
         void Start() {
             LoadFromFile();
@@ -69,29 +81,86 @@ namespace Bluecadet.Utils {
 #endif
         }
 
+        /// Loads settings from the base file, then merges any local overrides on top.
         public void LoadFromFile() {
             try {
-                string filePath = Path.Combine(Application.streamingAssetsPath, fileName);
-                string jsonString = File.ReadAllText(filePath);
-                currentSettings = JsonUtility.FromJson<AppSettings>(jsonString);
+                string basePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+                string baseJson = File.ReadAllText(basePath);
+                JObject baseObj = JObject.Parse(baseJson);
+
+                string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+                if (File.Exists(localPath)) {
+                    string localJson = File.ReadAllText(localPath);
+                    JObject localObj = JObject.Parse(localJson);
+                    baseObj.Merge(localObj, new JsonMergeSettings {
+                        MergeArrayHandling = MergeArrayHandling.Replace
+                    });
+                }
+
+                currentSettings = JsonUtility.FromJson<AppSettings>(baseObj.ToString());
             }
             catch (Exception ex) {
                 Debug.LogException(ex);
                 Debug.LogWarning("Unable to load settings. Creating new settings object and saving to file.");
 
                 currentSettings = new AppSettings();
-                SaveToFile();
+                SaveToBaseFile();
             }
             finally {
                 ApplyGeneralSettings();
                 BroadcastSettingsLoaded();
             }
         }
-        
-        void SaveToFile() {
-            string filePath = Path.Combine(Application.streamingAssetsPath, fileName);
-            string jsonString = JsonUtility.ToJson(currentSettings, true);
-            File.WriteAllText(filePath, jsonString);
+
+        /// Writes the full current settings to the base file.
+        public void SaveToBaseFile() {
+            string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+            File.WriteAllText(filePath, ToJson(currentSettings));
+        }
+
+        /// Diffs current settings against the base file and writes only the differences
+        /// to the local file. Deletes the local file if there are no differences.
+        public void SaveToLocalFile() {
+            string basePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            JObject baseObj;
+            if (File.Exists(basePath)) {
+                baseObj = JObject.Parse(File.ReadAllText(basePath));
+            } else {
+                baseObj = ToJObject(new AppSettings());
+            }
+
+            JObject currentObj = ToJObject(currentSettings);
+            JObject diff = ComputeDiff(baseObj, currentObj);
+
+            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+            if (diff.Count == 0) {
+                if (File.Exists(localPath)) {
+                    File.Delete(localPath);
+                }
+            } else {
+                Directory.CreateDirectory(Path.GetDirectoryName(localPath));
+                File.WriteAllText(localPath, diff.ToString(Newtonsoft.Json.Formatting.Indented));
+            }
+        }
+
+        /// Recursively compares two JObjects and returns only the properties that differ.
+        private static JObject ComputeDiff(JObject baseObj, JObject currentObj) {
+            var diff = new JObject();
+            foreach (var property in currentObj.Properties()) {
+                JToken baseVal = baseObj[property.Name];
+                if (baseVal == null) {
+                    diff[property.Name] = property.Value;
+                } else if (property.Value.Type == JTokenType.Object && baseVal.Type == JTokenType.Object) {
+                    JObject childDiff = ComputeDiff((JObject)baseVal, (JObject)property.Value);
+                    if (childDiff.Count > 0) {
+                        diff[property.Name] = childDiff;
+                    }
+                } else if (!JToken.DeepEquals(baseVal, property.Value)) {
+                    diff[property.Name] = property.Value;
+                }
+            }
+            return diff;
         }
 
         void BroadcastSettingsLoaded() {
