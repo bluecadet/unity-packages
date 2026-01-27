@@ -20,7 +20,6 @@ public class SettingsManagerEditor : Editor
     private SerializedObject _wrapperSO;
     private HashSet<string> _localOverridePaths = new();
     private HashSet<string> _dirtyPaths = new();
-    private JObject _cleanSnapshot;
 
     private Type _settingsType;
 
@@ -78,16 +77,12 @@ public class SettingsManagerEditor : Editor
         // Collect local override paths
         CollectLocalOverridePaths(serializedObject.FindProperty("localFileName").stringValue);
 
-        // Collect dirty paths (current vs on-disk snapshot)
-        CollectDirtyPaths();
-
         // Draw currentSettings via the wrapper
         var currentSettings = (AppSettings)GetCurrentSettings();
         _wrapper.settings = currentSettings;
         _wrapperSO = new SerializedObject(_wrapper);
 
         var settingsProp = _wrapperSO.FindProperty("settings");
-        EditorGUI.BeginChangeCheck();
 
         settingsProp.isExpanded = EditorGUILayout.Foldout(settingsProp.isExpanded, "Current Settings", true);
         if (settingsProp.isExpanded)
@@ -97,7 +92,7 @@ public class SettingsManagerEditor : Editor
             EditorGUI.indentLevel--;
         }
 
-        if (EditorGUI.EndChangeCheck())
+        if (_wrapperSO.hasModifiedProperties)
         {
             _wrapperSO.ApplyModifiedPropertiesWithoutUndo();
             SetCurrentSettings(_wrapper.settings);
@@ -126,19 +121,19 @@ public class SettingsManagerEditor : Editor
         if (GUILayout.Button("Save to Base File"))
         {
             ((Component)target).SendMessage("SaveToBaseFile", null, SendMessageOptions.DontRequireReceiver);
-            CaptureCleanSnapshot();
+            _dirtyPaths.Clear();
         }
 
         if (GUILayout.Button("Save to Local File"))
         {
             ((Component)target).SendMessage("SaveToLocalFile", null, SendMessageOptions.DontRequireReceiver);
-            CaptureCleanSnapshot();
+            _dirtyPaths.Clear();
         }
 
         if (GUILayout.Button("Load from File(s)"))
         {
             ((Component)target).SendMessage("LoadFromFile", null, SendMessageOptions.DontRequireReceiver);
-            CaptureCleanSnapshot();
+            _dirtyPaths.Clear();
         }
 
         EditorGUI.BeginDisabledGroup(!Application.isPlaying);
@@ -149,101 +144,6 @@ public class SettingsManagerEditor : Editor
         }
 
         EditorGUI.EndDisabledGroup();
-    }
-
-    private string SettingsToJson()
-    {
-        var settings = GetCurrentSettings();
-        return JsonUtility.ToJson(settings);
-    }
-
-    private void CaptureCleanSnapshot()
-    {
-        _cleanSnapshot = JObject.Parse(SettingsToJson());
-    }
-
-    private void CollectDirtyPaths()
-    {
-        _dirtyPaths.Clear();
-
-        if (_cleanSnapshot == null)
-        {
-            CaptureCleanSnapshotFromDisk();
-        }
-
-        if (_cleanSnapshot == null) return;
-
-        JObject current = JObject.Parse(SettingsToJson());
-        CollectDiffLeaves(_cleanSnapshot, current, "", _dirtyPaths);
-    }
-
-    private void CaptureCleanSnapshotFromDisk()
-    {
-        try
-        {
-            var baseFileName = serializedObject.FindProperty("baseFileName").stringValue;
-            string basePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
-            if (!File.Exists(basePath)) return;
-
-            JObject baseObj = JObject.Parse(File.ReadAllText(basePath));
-
-            var localFileName = serializedObject.FindProperty("localFileName").stringValue;
-            if (!string.IsNullOrEmpty(localFileName))
-            {
-                string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
-                if (File.Exists(localPath))
-                {
-                    JObject localObj = JObject.Parse(File.ReadAllText(localPath));
-                    baseObj.Merge(localObj, new JsonMergeSettings
-                    {
-                        MergeArrayHandling = MergeArrayHandling.Replace
-                    });
-                }
-            }
-
-            _cleanSnapshot = baseObj;
-        }
-        catch
-        {
-            _cleanSnapshot = JObject.Parse(SettingsToJson());
-        }
-    }
-
-    private static void CollectDiffLeaves(JObject baseline, JObject current, string prefix, HashSet<string> paths)
-    {
-        foreach (var prop in current.Properties())
-        {
-            string path = string.IsNullOrEmpty(prefix) ? prop.Name : prefix + "." + prop.Name;
-            JToken baseVal = baseline[prop.Name];
-
-            if (baseVal == null)
-            {
-                if (prop.Value.Type == JTokenType.Object)
-                    FlattenAllLeaves((JObject)prop.Value, path, paths);
-                else
-                    paths.Add(path);
-            }
-            else if (prop.Value.Type == JTokenType.Object && baseVal.Type == JTokenType.Object)
-            {
-                CollectDiffLeaves((JObject)baseVal, (JObject)prop.Value, path, paths);
-            }
-            else if (!JToken.DeepEquals(baseVal, prop.Value))
-            {
-                paths.Add(path);
-            }
-        }
-    }
-
-    private static void FlattenAllLeaves(JObject obj, string prefix, HashSet<string> paths)
-    {
-        foreach (var prop in obj.Properties())
-        {
-            string path = prefix + "." + prop.Name;
-            if (prop.Value.Type == JTokenType.Object)
-                FlattenAllLeaves((JObject)prop.Value, path, paths);
-            else
-                paths.Add(path);
-        }
     }
 
     private void CollectLocalOverridePaths(string localFileName)
@@ -308,10 +208,10 @@ public class SettingsManagerEditor : Editor
             if (hasChildren)
             {
                 Color? foldoutTint = null;
-                string prefix = jsonPath + ".";
+                string childPrefix = jsonPath + ".";
                 foreach (var p in _dirtyPaths)
                 {
-                    if (p.StartsWith(prefix) || p == jsonPath)
+                    if (p.StartsWith(childPrefix) || p == jsonPath)
                     {
                         foldoutTint = DirtyTint;
                         break;
@@ -321,7 +221,7 @@ public class SettingsManagerEditor : Editor
                 {
                     foreach (var p in _localOverridePaths)
                     {
-                        if (p.StartsWith(prefix) || p == jsonPath)
+                        if (p.StartsWith(childPrefix) || p == jsonPath)
                         {
                             foldoutTint = OverrideTint;
                             break;
@@ -346,7 +246,12 @@ public class SettingsManagerEditor : Editor
             }
             else
             {
+                EditorGUI.BeginChangeCheck();
                 EditorGUILayout.PropertyField(iter, false);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _dirtyPaths.Add(jsonPath);
+                }
                 GUI.backgroundColor = prevBg;
                 iter.NextVisible(false);
             }

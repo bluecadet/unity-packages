@@ -120,10 +120,12 @@ namespace Bluecadet.Utils {
         }
 
         /// Writes the full current settings to the base file.
+        /// Since all fields are saved to base, the local file is deleted.
         public void SaveToBaseFile() {
             string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
             Directory.CreateDirectory(Path.GetDirectoryName(filePath));
             File.WriteAllText(filePath, ToJson(currentSettings));
+            DeleteLocalFile();
         }
 
         /// Reads the existing base file (or defaults), merges only the fields at the
@@ -145,6 +147,7 @@ namespace Bluecadet.Utils {
 
             Directory.CreateDirectory(Path.GetDirectoryName(filePath));
             File.WriteAllText(filePath, baseObj.ToString(Newtonsoft.Json.Formatting.Indented));
+            RemovePathsFromLocalFile(dirtyPaths);
         }
 
         /// Copies a value at the given key path from source into target,
@@ -211,6 +214,68 @@ namespace Bluecadet.Utils {
                 }
             }
             return diff;
+        }
+
+        /// Deletes the local overrides file entirely.
+        private void DeleteLocalFile() {
+            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+            if (File.Exists(localPath))
+                File.Delete(localPath);
+            if (File.Exists(localPath + ".meta"))
+                File.Delete(localPath + ".meta");
+        }
+
+        /// Removes the given dot-separated paths from the local overrides file.
+        /// Deletes the file if no overrides remain.
+        private void RemovePathsFromLocalFile(IEnumerable<string> paths) {
+            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+            if (!File.Exists(localPath)) return;
+
+            JObject localObj;
+            try {
+                localObj = JObject.Parse(File.ReadAllText(localPath));
+            } catch {
+                return;
+            }
+
+            foreach (string path in paths) {
+                RemoveNestedPath(localObj, path.Split('.'), 0);
+            }
+
+            // Prune empty parent objects
+            PruneEmpty(localObj);
+
+            if (localObj.Count == 0) {
+                DeleteLocalFile();
+            } else {
+                File.WriteAllText(localPath, localObj.ToString(Newtonsoft.Json.Formatting.Indented));
+            }
+        }
+
+        /// Removes a leaf value at the given key path from a JObject.
+        private static void RemoveNestedPath(JObject obj, string[] parts, int index) {
+            string key = parts[index];
+            if (obj[key] == null) return;
+
+            if (index == parts.Length - 1) {
+                obj.Remove(key);
+            } else if (obj[key] is JObject child) {
+                RemoveNestedPath(child, parts, index + 1);
+            }
+        }
+
+        /// Recursively removes empty JObject children.
+        private static void PruneEmpty(JObject obj) {
+            var toRemove = new List<string>();
+            foreach (var prop in obj.Properties()) {
+                if (prop.Value is JObject child) {
+                    PruneEmpty(child);
+                    if (child.Count == 0)
+                        toRemove.Add(prop.Name);
+                }
+            }
+            foreach (var key in toRemove)
+                obj.Remove(key);
         }
 
         void BroadcastSettingsLoaded() {
