@@ -486,8 +486,7 @@ namespace Bluecadet.Hap
         /// Flow:
         /// 1. Wait for _decodeTargetFrame to change (or exit signal)
         /// 2. Decode the requested frame into the ring buffer's write slot
-        /// 3. If the target changed during decode (fast scrubbing), discard and re-decode latest
-        /// 4. Commit the decoded frame to make it available to the main thread
+        /// 3. Commit the decoded frame to make it available to the main thread
         /// </summary>
         void DecodeLoop()
         {
@@ -525,11 +524,6 @@ namespace Bluecadet.Hap
 
                     if (result == HapNative.ErrorNone)
                     {
-                        // Fast scrub check: if target changed during decode, discard this frame
-                        // and loop again to decode the latest requested frame
-                        if (target != _decodeTargetFrame)
-                            continue;
-
                         // Commit the frame to make it available for upload
                         ringBuffer.CommitWrite(target);
                         lastDecoded = target;
