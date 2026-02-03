@@ -6,7 +6,7 @@ using UnityEditor;
 using Bluecadet.Utils;
 using Newtonsoft.Json.Linq;
 
-[CustomEditor(typeof(SettingsManagerBase), true)]
+[CustomEditor(typeof(SettingsManager), true)]
 [CanEditMultipleObjects]
 public class SettingsManagerEditor : Editor
 {
