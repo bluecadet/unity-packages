@@ -10,7 +10,6 @@ set(PLUGIN_SOURCES
     src/bluecadet_hap.c
     src/hap_demux.c
     src/hap_decode.c
-    src/ring_buffer.c
     vendor/hap/hap.c
     vendor/snappy/snappy-c.c
 )

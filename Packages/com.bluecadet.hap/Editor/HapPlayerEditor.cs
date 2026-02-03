@@ -9,14 +9,22 @@ namespace Bluecadet.Hap.Editor
         SerializedProperty _filePath;
         SerializedProperty _playOnEnable;
         SerializedProperty _loop;
+        SerializedProperty _renderMode;
+        SerializedProperty _timeSource;
+        SerializedProperty _playbackSpeed;
         SerializedProperty _targetRenderer;
+        SerializedProperty _targetRenderTexture;
 
         void OnEnable()
         {
             _filePath = serializedObject.FindProperty("filePath");
             _playOnEnable = serializedObject.FindProperty("playOnEnable");
             _loop = serializedObject.FindProperty("loop");
+            _renderMode = serializedObject.FindProperty("renderMode");
+            _timeSource = serializedObject.FindProperty("timeSource");
+            _playbackSpeed = serializedObject.FindProperty("playbackSpeed");
             _targetRenderer = serializedObject.FindProperty("targetRenderer");
+            _targetRenderTexture = serializedObject.FindProperty("targetRenderTexture");
         }
 
         public override void OnInspectorGUI()
@@ -35,7 +43,16 @@ namespace Bluecadet.Hap.Editor
 
             EditorGUILayout.PropertyField(_playOnEnable);
             EditorGUILayout.PropertyField(_loop);
-            EditorGUILayout.PropertyField(_targetRenderer);
+
+            EditorGUILayout.PropertyField(_renderMode);
+            var mode = (HapRenderMode)_renderMode.enumValueIndex;
+            if (mode == HapRenderMode.MaterialOverride)
+                EditorGUILayout.PropertyField(_targetRenderer);
+            else if (mode == HapRenderMode.RenderTexture)
+                EditorGUILayout.PropertyField(_targetRenderTexture);
+
+            EditorGUILayout.PropertyField(_timeSource);
+            EditorGUILayout.PropertyField(_playbackSpeed);
 
             var player = (HapPlayer)target;
 
@@ -55,6 +72,13 @@ namespace Bluecadet.Hap.Editor
                 }
 
                 EditorGUILayout.Space();
+
+                float time = player.Time;
+                float newTime = EditorGUILayout.Slider("Scrub", time, 0f, player.Duration);
+                if (!Mathf.Approximately(newTime, time))
+                    player.Time = newTime;
+
+                EditorGUILayout.Space();
                 EditorGUILayout.BeginHorizontal();
                 if (GUILayout.Button(player.IsPlaying ? "Pause" : "Play"))
                 {
@@ -65,7 +89,8 @@ namespace Bluecadet.Hap.Editor
                     player.Stop();
                 EditorGUILayout.EndHorizontal();
 
-                Repaint();
+                if (player.IsPlaying)
+                    Repaint();
             }
 
             serializedObject.ApplyModifiedProperties();

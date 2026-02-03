@@ -7,6 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 64-bit fseek/ftell portability */
+#ifdef _WIN32
+  #define fseek64(f, off, w) _fseeki64((f), (off), (w))
+  #define ftell64(f)         _ftelli64((f))
+#else
+  #define fseek64(f, off, w) fseeko((f), (off_t)(off), (w))
+  #define ftell64(f)         ((int64_t)ftello((f)))
+#endif
+
 #define MINIMP4_ALLOW_64BIT 1
 #define MINIMP4_IMPLEMENTATION
 #include "minimp4.h"
@@ -26,7 +35,7 @@ struct HapDemux {
 static int mp4_read_callback(int64_t offset, void *buffer, size_t size, void *token)
 {
     FILE *f = (FILE *)token;
-    if (fseek(f, (long)offset, SEEK_SET) != 0)
+    if (fseek64(f, offset, SEEK_SET) != 0)
         return -1;
     size_t rd = fread(buffer, 1, size, f);
     return (rd == size) ? 0 : -1;
@@ -79,7 +88,7 @@ static int parse_stsd_dimensions(FILE *f, int64_t file_size,
     uint8_t hdr[16];
 
     while (pos < file_size) {
-        if (fseek(f, (long)pos, SEEK_SET) != 0) break;
+        if (fseek64(f, pos, SEEK_SET) != 0) break;
         if (fread(hdr, 1, 8, f) != 8) break;
 
         uint64_t sz = read_be32(hdr);
@@ -106,7 +115,7 @@ static int parse_stsd_dimensions(FILE *f, int64_t file_size,
     uint8_t *moov = (uint8_t *)malloc((size_t)moov_size);
     if (!moov) return 0;
 
-    if (fseek(f, (long)moov_offset, SEEK_SET) != 0 ||
+    if (fseek64(f, moov_offset, SEEK_SET) != 0 ||
         fread(moov, 1, (size_t)moov_size, f) != (size_t)moov_size) {
         free(moov);
         return 0;
@@ -188,9 +197,9 @@ HapDemux *hap_demux_open(const char *path)
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
 
-    fseek(f, 0, SEEK_END);
-    int64_t fsize = (int64_t)ftell(f);
-    fseek(f, 0, SEEK_SET);
+    fseek64(f, 0, SEEK_END);
+    int64_t fsize = ftell64(f);
+    fseek64(f, 0, SEEK_SET);
 
     if (fsize <= 0) {
         fclose(f);
@@ -300,7 +309,7 @@ int hap_demux_read_sample(HapDemux *d, int frame_index, uint8_t *buf, int buf_si
     if (buf_size < (int)frame_bytes)
         return -1;
 
-    if (fseek(d->file, (long)ofs, SEEK_SET) != 0)
+    if (fseek64(d->file, (int64_t)ofs, SEEK_SET) != 0)
         return -1;
 
     size_t rd = fread(buf, 1, (size_t)frame_bytes, d->file);
