@@ -123,11 +123,7 @@ All under `Native~/vendor/`. None are modified except as noted below.
 |---------|--------|---------|
 | [minimp4](https://github.com/lieff/minimp4) | Header-only MOV/MP4 demuxer | CC0 |
 | [hap](https://github.com/Vidvox/hap) | HAP reference codec | BSD-2-Clause |
-| [snappy-c](https://github.com/andikleen/snappy-c) | Snappy decompression (C port) | BSD-3-Clause |
-
-### Vendor modifications
-
-- **snappy-c**: Added `snappy-c.h` and `snappy-c.c` — a compatibility shim that wraps andikleen's snappy API to match the Google `snappy-c.h` interface expected by the Vidvox HAP library. The original `snappy.h`/`snappy.c` are unmodified; `snappy-c.c` includes `snappy.c` with renamed symbols and provides wrapper functions with Google-compatible signatures (`snappy_status` return types, 4-argument `snappy_uncompress`, etc.).
+| [snappy](https://github.com/google/snappy) | Google's official Snappy compression library | BSD-3-Clause |
 
 ### Known quirks
 
