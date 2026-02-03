@@ -24,14 +24,23 @@ namespace Bluecadet.Utils {
         public GeneralSettings general = new();
     }
 
+    /// Non-generic base class for SettingsManager<TSettings>.
+    /// Exists so the custom editor can target all generic variants.
     [ExecuteInEditMode]
-    public abstract class SettingsManager<TSettings> : Singleton<SettingsManager<TSettings>>
+    public abstract class SettingsManagerBase : MonoBehaviour { }
+
+    [ExecuteInEditMode]
+    public abstract class SettingsManager<TSettings> : SettingsManagerBase
         where TSettings : AppSettings, new() {
+        
+        public static SettingsManager<TSettings> Get() => SingletonRegistry<SettingsManager<TSettings>>.Get();
+        public static SettingsManager<TSettings> Instance => SingletonRegistry<SettingsManager<TSettings>>.Get();
+
         public event Action<TSettings> OnSettingsLoaded;
 
         public static TSettings Settings {
             get {
-                return ((SettingsManager<TSettings>)Get()).currentSettings;
+                return Get()?.currentSettings;
             }
         }
 
