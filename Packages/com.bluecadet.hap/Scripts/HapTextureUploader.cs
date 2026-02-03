@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using Unity.Profiling;
 
 namespace Bluecadet.Hap
 {
@@ -14,6 +15,9 @@ namespace Bluecadet.Hap
     /// </summary>
     internal sealed class HapTextureUploader : IDisposable
     {
+        static readonly ProfilerMarker s_LoadDataMarker = new ProfilerMarker("HapPlayer.LoadRawTextureData");
+        static readonly ProfilerMarker s_ApplyMarker = new ProfilerMarker("HapPlayer.TextureApply");
+
         Texture2D _texture;
         bool _disposed;
 
@@ -66,11 +70,17 @@ namespace Bluecadet.Hap
             if (_texture == null || data == IntPtr.Zero) return;
 
             // Load the raw compressed data into the texture's CPU buffer
-            _texture.LoadRawTextureData(data, size);
+            using (s_LoadDataMarker.Auto())
+            {
+                _texture.LoadRawTextureData(data, size);
+            }
 
             // Upload to GPU. Parameters: updateMipmaps=false, makeNoLongerReadable=false
             // We keep it readable so we can update it again next frame
-            _texture.Apply(false, false);
+            using (s_ApplyMarker.Auto())
+            {
+                _texture.Apply(false, false);
+            }
         }
 
         /// <summary>

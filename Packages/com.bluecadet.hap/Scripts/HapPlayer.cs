@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading;
 using UnityEngine;
+using Unity.Profiling;
 
 namespace Bluecadet.Hap
 {
@@ -124,6 +125,15 @@ namespace Bluecadet.Hap
         static readonly int MainTexId = Shader.PropertyToID("_MainTex");
 
         // ─────────────────────────────────────────────────────────────────────
+        // Profiler markers (visible in Unity Profiler)
+        // ─────────────────────────────────────────────────────────────────────
+
+        static readonly ProfilerMarker s_UpdateMarker = new ProfilerMarker("HapPlayer.Update");
+        static readonly ProfilerMarker s_UploadMarker = new ProfilerMarker("HapPlayer.UploadFrame");
+        static readonly ProfilerMarker s_RenderMarker = new ProfilerMarker("HapPlayer.Render");
+        static readonly ProfilerMarker s_DecodeMarker = new ProfilerMarker("HapPlayer.DecodeFrame");
+
+        // ─────────────────────────────────────────────────────────────────────
         // Events
         // ─────────────────────────────────────────────────────────────────────
 
@@ -229,6 +239,14 @@ namespace Bluecadet.Hap
         {
             if (!IsOpen) return;
 
+            using (s_UpdateMarker.Auto())
+            {
+                UpdatePlayback();
+            }
+        }
+
+        void UpdatePlayback()
+        {
             // Advance playback clock if playing
             if (_playing)
             {
@@ -259,9 +277,13 @@ namespace Bluecadet.Hap
             }
 
             // Upload the latest decoded frame to the GPU texture
-            UploadFrame();
+            using (s_UploadMarker.Auto())
+            {
+                UploadFrame();
+            }
 
             // Apply the texture to the output target based on render mode
+            using (s_RenderMarker.Auto())
             switch (renderMode)
             {
                 case HapRenderMode.MaterialOverride:
@@ -495,7 +517,11 @@ namespace Bluecadet.Hap
 
                     // Decode into the ring buffer's write slot
                     IntPtr buf = ringBuffer.WritePtr;
-                    int result = HapNative.hap_decode_frame(_handle, target, buf, _frameBufferSize);
+                    int result;
+                    using (s_DecodeMarker.Auto())
+                    {
+                        result = HapNative.hap_decode_frame(_handle, target, buf, _frameBufferSize);
+                    }
 
                     if (result == HapNative.ErrorNone)
                     {
