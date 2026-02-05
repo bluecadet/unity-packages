@@ -77,12 +77,12 @@ namespace Bluecadet.Touchscreen {
         /// </summary>
         public readonly Vector2 initialPosition;
 
-        public GesturePanData(PointerEventData pointer, Vector2 initialPosition) {
+        public GesturePanData(PointerEventData pointer, Vector2 initialPosition, Vector2 velocity) {
             this.pointer = pointer;
             this.position = pointer.position;
             this.delta = pointer.delta;
             this.initialPosition = initialPosition;
-            this.velocity = delta / Time.deltaTime;
+            this.velocity = velocity;
         }
     }
 
@@ -253,6 +253,8 @@ namespace Bluecadet.Touchscreen {
         private Vector2 initialPanPosition;
         private bool isPinching = false;
         private bool isPanning = false;
+        private float lastDragTime;
+        private float lastPinchDragTime;
 
         // Track which specific pointers started the pinch gesture
         private int pinchPointer1Id = -1;
@@ -269,23 +271,25 @@ namespace Bluecadet.Touchscreen {
             if (activePointers.Count == 1) {
                 initialPanPosition = eventData.position;
                 isPanning = true;
+                lastDragTime = Time.time;
                 panVelocityTracker.Clear();
                 OnPanStart?.Invoke(new GesturePanStartData(eventData));
             }
         }
 
         public void OnPointerUp(PointerEventData eventData) {
+            float currentTime = Time.time;
             if (activePointers.Count == 1 && isPanning) {
                 // End pan gesture
-                Vector2 rollingVelocity = panVelocityTracker.GetAveragedVelocity();
-                Vector2 finalVelocity = panVelocityTracker.GetLastVelocity();
+                Vector2 rollingVelocity = panVelocityTracker.GetAveragedVelocity(currentTime);
+                Vector2 finalVelocity = panVelocityTracker.GetLastVelocity(currentTime);
                 OnPanEnd?.Invoke(new GesturePanEndData(eventData, initialPanPosition, rollingVelocity, finalVelocity));
             } else if (activePointers.Count == 2 && isPinching) {
                 // End pinch gesture
                 PointerEventData[] pointers = new PointerEventData[2];
                 activePointers.Values.CopyTo(pointers, 0);
-                Vector2 rollingOriginVelocity = pinchOriginVelocityTracker.GetAveragedVelocity();
-                Vector2 finalOriginVelocity = pinchOriginVelocityTracker.GetLastVelocity();
+                Vector2 rollingOriginVelocity = pinchOriginVelocityTracker.GetAveragedVelocity(currentTime);
+                Vector2 finalOriginVelocity = pinchOriginVelocityTracker.GetLastVelocity(currentTime);
                 OnPinchEnd?.Invoke(new GesturePinchEndData(pointers[0], pointers[1], initialPinchValues, lastPinchValues, rollingOriginVelocity, finalOriginVelocity));
             }
 
@@ -309,14 +313,13 @@ namespace Bluecadet.Touchscreen {
             }
 
             if (activePointers.Count == 1 && isPanning) {
-                // Handle pan gesture
-                GesturePanData panData = new GesturePanData(eventData, initialPanPosition);
+                // Handle pan gesture - use actual time between drag events for velocity
+                float timeSinceLastDrag = Time.time - lastDragTime;
+                Vector2 velocity = timeSinceLastDrag > 0 ? eventData.delta / timeSinceLastDrag : Vector2.zero;
+                lastDragTime = Time.time;
 
-                // Track pan velocity
-                if (Time.deltaTime > 0) {
-                    Vector2 velocity = eventData.delta / Time.deltaTime;
-                    panVelocityTracker.TrackVelocity(velocity, Time.time);
-                }
+                GesturePanData panData = new GesturePanData(eventData, initialPanPosition, velocity);
+                panVelocityTracker.TrackVelocity(velocity, Time.time);
 
                 OnPan?.Invoke(panData);
             } else if (activePointers.Count == 2) {
@@ -342,6 +345,7 @@ namespace Bluecadet.Touchscreen {
                     isPinching = true;
 
                     // Clear velocity tracker for new pinch gesture
+                    lastPinchDragTime = Time.time;
                     pinchOriginVelocityTracker.Clear();
 
                     OnPinchStart?.Invoke(new GesturePinchStartData(pointers[0], pointers[1], initialPinchValues));
@@ -349,11 +353,13 @@ namespace Bluecadet.Touchscreen {
 
                 GesturePinchData pinchData = new GesturePinchData(pointers[0], pointers[1], initialPinchValues, lastPinchValues);
 
-                // Track origin velocity (using delta / deltaTime)
-                if (Time.deltaTime > 0) {
-                    Vector2 originVelocity = pinchData.delta.origin / Time.deltaTime;
+                // Track origin velocity using actual time between drag events
+                float timeSinceLastPinchDrag = Time.time - lastPinchDragTime;
+                if (timeSinceLastPinchDrag > 0) {
+                    Vector2 originVelocity = pinchData.delta.origin / timeSinceLastPinchDrag;
                     pinchOriginVelocityTracker.TrackVelocity(originVelocity, Time.time);
                 }
+                lastPinchDragTime = Time.time;
 
                 OnPinch?.Invoke(pinchData);
 
@@ -367,11 +373,13 @@ namespace Bluecadet.Touchscreen {
 
                     GesturePinchData pinchData = new GesturePinchData(pointer1, pointer2, initialPinchValues, lastPinchValues);
 
-                    // Track origin velocity (using delta / deltaTime)
-                    if (Time.deltaTime > 0) {
-                        Vector2 originVelocity = pinchData.delta.origin / Time.deltaTime;
+                    // Track origin velocity using actual time between drag events
+                    float timeSinceLastPinchDrag = Time.time - lastPinchDragTime;
+                    if (timeSinceLastPinchDrag > 0) {
+                        Vector2 originVelocity = pinchData.delta.origin / timeSinceLastPinchDrag;
                         pinchOriginVelocityTracker.TrackVelocity(originVelocity, Time.time);
                     }
+                    lastPinchDragTime = Time.time;
 
                     OnPinch?.Invoke(pinchData);
 

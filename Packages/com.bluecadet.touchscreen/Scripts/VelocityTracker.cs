@@ -90,22 +90,33 @@ namespace Bluecadet.Touchscreen {
         /// <summary>
         /// Get the most recent velocity sample (instantaneous/final velocity).
         /// </summary>
-        /// <returns>Most recent velocity, or zero if no samples</returns>
-        public T GetLastVelocity() {
+        /// <param name="currentTime">Reference time to calculate sample age from. If negative, returns last sample regardless of age.</param>
+        /// <param name="maxAge">Maximum age of sample to consider valid (default 0.1 seconds)</param>
+        /// <returns>Most recent velocity, or zero if no samples or sample is too old</returns>
+        public T GetLastVelocity(float currentTime = -1f, float maxAge = 0.1f) {
             if (filledCount == 0) return zero;
             int lastIndex = (currentIndex - 1 + sampleCount) % sampleCount;
+
+            if (currentTime >= 0f) {
+                float age = currentTime - timestamps[lastIndex];
+                if (age > maxAge) return zero;
+            }
+
             return samples[lastIndex];
         }
 
         /// <summary>
         /// Get the averaged velocity from recent samples.
         /// </summary>
+        /// <param name="currentTime">Reference time to calculate sample age from. If negative, uses most recent sample's timestamp.</param>
         /// <param name="maxAge">Maximum age of samples to include (default 0.1 seconds)</param>
         /// <returns>Averaged velocity, or zero if no valid samples</returns>
-        public T GetAveragedVelocity(float maxAge = 0.1f) {
+        public T GetAveragedVelocity(float currentTime = -1f, float maxAge = 0.1f) {
             if (filledCount == 0) return zero;
 
-            float currentTime = timestamps[(currentIndex - 1 + sampleCount) % sampleCount];
+            if (currentTime < 0f) {
+                currentTime = timestamps[(currentIndex - 1 + sampleCount) % sampleCount];
+            }
             T sum = zero;
             int count = 0;
 
