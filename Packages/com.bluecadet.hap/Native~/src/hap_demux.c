@@ -17,6 +17,7 @@
 #endif
 
 #define MINIMP4_ALLOW_64BIT 1
+#define MP4D_64BIT_SUPPORTED 1
 #define MINIMP4_IMPLEMENTATION
 #include "minimp4.h"
 
