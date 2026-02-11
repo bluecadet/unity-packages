@@ -36,7 +36,6 @@ namespace Bluecadet.UIBlur {
 
     private UIBlurRenderPass renderPass;
     private Material blurMaterial;
-    private Texture2D clearTexture;
 
     public override void Create() {
       // Load the Kawase shader
@@ -64,12 +63,7 @@ namespace Bluecadet.UIBlur {
       // In scene view, set a clear texture so shaders sampling the blur texture
       // get transparent instead of black, then skip the actual blur pass.
       if (renderingData.cameraData.cameraType == CameraType.SceneView) {
-        if (clearTexture == null) {
-          clearTexture = new Texture2D(1, 1, TextureFormat.RGBA32, false);
-          clearTexture.SetPixel(0, 0, Color.clear);
-          clearTexture.Apply();
-        }
-        Shader.SetGlobalTexture(settings.renderTextureName, clearTexture);
+        Shader.SetGlobalTexture(settings.renderTextureName, Texture2D.blackTexture);
         return;
       }
 
@@ -92,10 +86,6 @@ namespace Bluecadet.UIBlur {
       if (disposing) {
         renderPass?.Dispose();
         CoreUtils.Destroy(blurMaterial);
-        if (clearTexture != null) {
-          CoreUtils.Destroy(clearTexture);
-          clearTexture = null;
-        }
       }
     }
 
