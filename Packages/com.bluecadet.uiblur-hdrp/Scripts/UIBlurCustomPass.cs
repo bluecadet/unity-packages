@@ -60,7 +60,7 @@ namespace Bluecadet.UIBlur.HDRP
                 blurRTs[i] = RTHandles.Alloc(
                     Vector2.one * scale, TextureXR.slices,
                     dimension: TextureXR.dimension,
-                    colorFormat: GraphicsFormat.B10G11R11_UFloatPack32,
+                    colorFormat: GraphicsFormat.R16G16B16A16_SFloat,
                     useDynamicScale: true,
                     name: $"UIBlur_{i}"
                 );
@@ -69,7 +69,7 @@ namespace Bluecadet.UIBlur.HDRP
             finalRT = RTHandles.Alloc(
                 Vector2.one, TextureXR.slices,
                 dimension: TextureXR.dimension,
-                colorFormat: GraphicsFormat.B10G11R11_UFloatPack32,
+                colorFormat: GraphicsFormat.R16G16B16A16_SFloat,
                 useDynamicScale: true,
                 name: "UIBlur_Final"
             );
@@ -91,6 +91,14 @@ namespace Bluecadet.UIBlur.HDRP
         protected override void Execute(CustomPassContext ctx)
         {
             if (blurMaterial == null || blurRTs == null) return;
+
+            // Skip blur in scene view to avoid flashing artifacts
+            if (ctx.hdCamera.camera.cameraType == CameraType.SceneView)
+            {
+                CoreUtils.SetRenderTarget(ctx.cmd, finalRT, ClearFlag.Color, Color.clear);
+                ctx.cmd.SetGlobalTexture(renderTextureId, finalRT);
+                return;
+            }
 
             // Early exit for near-zero blur - just copy camera buffer
             if (blurScale <= 0.01f)
