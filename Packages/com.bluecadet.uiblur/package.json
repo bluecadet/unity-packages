@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.uiblur",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "displayName": "Bluecadet UI Blur",
   "description": "Kawase blur effect for ui elements in URP.",
   "unity": "6000.3",
