@@ -7,7 +7,7 @@ namespace Bluecadet.UIBlur {
   [System.Serializable]
   public class BlurSettings {
     [Header("Blur Configuration")]
-    [Range(0f, 64f)]
+    [Range(0f, 256f)]
     [Tooltip("Blur scale - higher values produce stronger blur")]
     public float blurScale = 4f;
 

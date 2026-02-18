@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.uiblur-hdrp",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "displayName": "Bluecadet UI Blur (HDRP)",
   "description": "Kawase blur effect for UI elements in HDRP.",
   "unity": "6000.3",

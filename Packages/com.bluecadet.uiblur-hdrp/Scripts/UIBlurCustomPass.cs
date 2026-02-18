@@ -9,7 +9,7 @@ namespace Bluecadet.UIBlur.HDRP
     public class UIBlurCustomPass : CustomPass
     {
         // [Header("Blur Configuration")]
-        [SerializeField, Range(0f, 64f)]
+        [SerializeField, Range(0f, 256f)]
         public float blurScale = 4f;
 
         // [Header("Render Configuration")]
@@ -28,7 +28,7 @@ namespace Bluecadet.UIBlur.HDRP
 
         private const int PASS_DOWNSAMPLE = 0;
         private const int PASS_UPSAMPLE = 1;
-        private const int MAX_PASSES = 6;
+        private const int MAX_PASSES = 12;
 
         // Pre-allocated RTHandles for all possible passes
         private RTHandle[] blurRTs;
