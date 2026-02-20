@@ -49,7 +49,7 @@ namespace Bluecadet.Hap
         public static extern float hap_get_frame_rate(IntPtr h);
 
         /// <summary>
-        /// Get the texture format code (TexFormatDXT1, TexFormatDXT5, or TexFormatBC7).
+        /// Get the texture format code (TexFormatDXT1, TexFormatDXT5, TexFormatBC7, or TexFormatYCoCgDXT5).
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int hap_get_texture_format(IntPtr h);
@@ -97,8 +97,9 @@ namespace Bluecadet.Hap
         // Texture format codes
         // ─────────────────────────────────────────────────────────────────────
 
-        public const int TexFormatDXT1 = 1;  // HAP — DXT1/BC1, no alpha, 4:1 compression
-        public const int TexFormatDXT5 = 2;  // HAP Alpha — DXT5/BC3, with alpha channel
-        public const int TexFormatBC7 = 3;   // HAP Q — BC7, higher quality, slower encode
+        public const int TexFormatDXT1      = 1;  // HAP — DXT1/BC1, no alpha, 4:1 compression
+        public const int TexFormatDXT5      = 2;  // HAP Alpha — DXT5/BC3, with alpha channel
+        public const int TexFormatBC7       = 3;  // BC7 variant
+        public const int TexFormatYCoCgDXT5 = 4;  // HAP Q — DXT5 with YCoCg color space, requires shader decode
     }
 }

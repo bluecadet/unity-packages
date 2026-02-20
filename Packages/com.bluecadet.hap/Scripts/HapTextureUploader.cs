@@ -33,20 +33,18 @@ namespace Bluecadet.Hap
         public HapTextureUploader(int width, int height, int hapTextureFormat)
         {
             // Map HAP format codes to Unity TextureFormat
+            bool unknownFormat = false;
             var format = hapTextureFormat switch
             {
-                HapNative.TexFormatDXT1 => TextureFormat.DXT1,  // HAP (4:1 compression)
-                HapNative.TexFormatDXT5 => TextureFormat.DXT5,  // HAP Alpha (with alpha channel)
-                HapNative.TexFormatBC7 => TextureFormat.BC7,    // HAP Q (higher quality)
-                _ => TextureFormat.DXT1
+                HapNative.TexFormatDXT1      => TextureFormat.DXT1,  // HAP
+                HapNative.TexFormatDXT5      => TextureFormat.DXT5,  // HAP Alpha
+                HapNative.TexFormatBC7       => TextureFormat.BC7,
+                HapNative.TexFormatYCoCgDXT5 => TextureFormat.DXT5,  // HAP Q — same GPU format as DXT5, YCoCg decoded by shader
+                _ => Fallback(out unknownFormat)
             };
 
-            if (hapTextureFormat != HapNative.TexFormatDXT1 &&
-                hapTextureFormat != HapNative.TexFormatDXT5 &&
-                hapTextureFormat != HapNative.TexFormatBC7)
-            {
+            if (unknownFormat)
                 Debug.LogWarning($"[HapTextureUploader] Unknown texture format {hapTextureFormat}, falling back to DXT1");
-            }
 
             // Create texture with no mipmaps (video frames don't need them)
             _texture = new Texture2D(width, height, format, false)
@@ -55,6 +53,8 @@ namespace Bluecadet.Hap
                 wrapMode = TextureWrapMode.Clamp
             };
         }
+
+        static TextureFormat Fallback(out bool flagged) { flagged = true; return TextureFormat.DXT1; }
 
         /// <summary>
         /// Upload raw compressed texture data to the GPU.

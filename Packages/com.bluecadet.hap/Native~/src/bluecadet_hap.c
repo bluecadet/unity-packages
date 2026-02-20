@@ -27,6 +27,7 @@ static int compute_frame_buffer_size(int width, int height, int hap_tex_format)
             break;
         case 2: /* DXT5 */
         case 3: /* BC7 */
+        case 4: /* YCoCg_DXT5 */
             block_size = 16;
             break;
         default:

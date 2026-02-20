@@ -275,8 +275,10 @@ int hap_decoder_decode(HapDecoder *dec,
                 *out_texture_format = HAP_TEX_FORMAT_DXT1;
                 break;
             case HapTextureFormat_RGBA_DXT5:
-            case HapTextureFormat_YCoCg_DXT5:
                 *out_texture_format = HAP_TEX_FORMAT_DXT5;
+                break;
+            case HapTextureFormat_YCoCg_DXT5:
+                *out_texture_format = HAP_TEX_FORMAT_YCOCG_DXT5;
                 break;
             case HapTextureFormat_RGBA_BPTC_UNORM:
                 *out_texture_format = HAP_TEX_FORMAT_BC7;

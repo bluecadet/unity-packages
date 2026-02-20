@@ -68,7 +68,7 @@ namespace Bluecadet.Hap.Editor
                 if (player.Texture != null)
                 {
                     EditorGUILayout.LabelField("Texture",
-                        $"{player.Texture.width}x{player.Texture.height} {player.Texture.format}");
+                        $"{player.Texture.width}x{player.Texture.height} {player.Texture.graphicsFormat}");
                 }
 
                 EditorGUILayout.Space();

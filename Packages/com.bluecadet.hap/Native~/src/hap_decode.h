@@ -8,10 +8,12 @@
 
 typedef struct HapDecoder HapDecoder;
 
-/* Texture format constants (match Unity's TextureFormat enum subset). */
-#define HAP_TEX_FORMAT_DXT1  1
-#define HAP_TEX_FORMAT_DXT5  2
-#define HAP_TEX_FORMAT_BC7   3
+/* Internal texture format constants. These are translated to Unity TextureFormat in HapTextureUploader.
+ * They do NOT match Unity's TextureFormat enum values. */
+#define HAP_TEX_FORMAT_DXT1        1
+#define HAP_TEX_FORMAT_DXT5        2
+#define HAP_TEX_FORMAT_BC7         3
+#define HAP_TEX_FORMAT_YCOCG_DXT5  4  /* HAP Q — DXT5 with YCoCg color space, needs shader decode */
 
 /*
  * Create a decoder. thread_count=0 means auto-detect.
