@@ -125,17 +125,18 @@ namespace Bluecadet.Hap
         static readonly int MainTexId = Shader.PropertyToID("_MainTex");
 
         // ─────────────────────────────────────────────────────────────────────
-        // HAP Q / YCoCg decode
+        // Output RenderTexture (all formats)
         // ─────────────────────────────────────────────────────────────────────
 
-        /// <summary>True when the video is HAP Q (YCoCg color space), requiring a shader decode step.</summary>
-        bool _isYCoCg;
+        /// <summary>
+        /// Final decoded and orientation-corrected output texture.
+        /// All formats blit through here to correct the 180° orientation flip and (for HAP Q)
+        /// perform the YCoCg→RGB color space conversion.
+        /// </summary>
+        RenderTexture _outputRT;
 
-        /// <summary>Decoded RGBA output for HAP Q. Null for non-YCoCg videos.</summary>
-        RenderTexture _yCoCgRT;
-
-        /// <summary>Material using the YCoCg→RGB shader, reused each frame.</summary>
-        Material _yCoCgMat;
+        /// <summary>Material used for the output blit. Shader varies by format.</summary>
+        Material _outputMat;
 
         // ─────────────────────────────────────────────────────────────────────
         // Profiler markers (visible in Unity Profiler)
@@ -161,11 +162,10 @@ namespace Bluecadet.Hap
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// The current video frame, ready to sample as RGBA.
-        /// HAP/HAP Alpha: a Texture2D (DXT1/DXT5).
-        /// HAP Q: a RenderTexture decoded from YCoCg to RGB.
+        /// The current video frame as a correctly-oriented RGBA RenderTexture.
+        /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
-        public Texture Texture => _yCoCgRT != null ? (Texture)_yCoCgRT : (Texture)_uploader?.Texture;
+        public Texture Texture => _outputRT != null ? (Texture)_outputRT : (Texture)_uploader?.Texture;
 
         public bool IsPlaying => _playing;
         public bool IsOpen => _handle != IntPtr.Zero;
@@ -413,26 +413,28 @@ namespace Bluecadet.Hap
             // Create texture uploader (manages the Texture2D)
             _uploader = new HapTextureUploader(_width, _height, texFormat);
 
-            // HAP Q: set up YCoCg→RGB decode pipeline
-            _isYCoCg = texFormat == HapNative.TexFormatYCoCgDXT5;
-            if (_isYCoCg)
+            // Set up the output blit pipeline.
+            // All formats need a V-flip to correct Unity's raw DXT orientation
+            // (HAP stores top-to-bottom; LoadRawTextureData treats it as bottom-to-top).
+            // HAP Q additionally needs YCoCg→RGB color space conversion.
+            string shaderName = texFormat == HapNative.TexFormatYCoCgDXT5
+                ? "HapYCoCgDecode"
+                : "HapFlip";
+            var outputShader = Resources.Load<Shader>(shaderName);
+            if (outputShader == null)
             {
-                var yCoCgShader = Resources.Load<Shader>("HapYCoCgDecode");
-                if (yCoCgShader == null)
+                Debug.LogError($"[HapPlayer] Output shader '{shaderName}' not found — video will be unflipped");
+            }
+            else
+            {
+                _outputMat = new Material(outputShader) { hideFlags = HideFlags.HideAndDontSave };
+                _outputRT = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
                 {
-                    Debug.LogError("[HapPlayer] YCoCg decode shader not found — HAP Q will not display correctly");
-                }
-                else
-                {
-                    _yCoCgMat = new Material(yCoCgShader) { hideFlags = HideFlags.HideAndDontSave };
-                    _yCoCgRT = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
-                    {
-                        filterMode = FilterMode.Bilinear,
-                        wrapMode = TextureWrapMode.Clamp,
-                        hideFlags = HideFlags.HideAndDontSave
-                    };
-                    _yCoCgRT.Create();
-                }
+                    filterMode = FilterMode.Bilinear,
+                    wrapMode = TextureWrapMode.Clamp,
+                    hideFlags = HideFlags.HideAndDontSave
+                };
+                _outputRT.Create();
             }
 
             _clock = 0f;
@@ -479,18 +481,17 @@ namespace Bluecadet.Hap
             _ringBuffer?.Dispose();
             _ringBuffer = null;
 
-            if (_yCoCgRT != null)
+            if (_outputRT != null)
             {
-                _yCoCgRT.Release();
-                UnityEngine.Object.Destroy(_yCoCgRT);
-                _yCoCgRT = null;
+                _outputRT.Release();
+                UnityEngine.Object.Destroy(_outputRT);
+                _outputRT = null;
             }
-            if (_yCoCgMat != null)
+            if (_outputMat != null)
             {
-                UnityEngine.Object.Destroy(_yCoCgMat);
-                _yCoCgMat = null;
+                UnityEngine.Object.Destroy(_outputMat);
+                _outputMat = null;
             }
-            _isYCoCg = false;
 
             // Close native handle
             if (_handle != IntPtr.Zero)
@@ -614,9 +615,9 @@ namespace Bluecadet.Hap
             // Upload the raw DXT/BC7 data to the texture
             _uploader.Upload(ptr, _frameBufferSize);
 
-            // HAP Q: decode YCoCg→RGB into the output RenderTexture
-            if (_isYCoCg && _yCoCgRT != null && _yCoCgMat != null)
-                Graphics.Blit(_uploader.Texture, _yCoCgRT, _yCoCgMat);
+            // Blit through the output shader (flip orientation and/or YCoCg decode)
+            if (_outputRT != null && _outputMat != null)
+                Graphics.Blit(_uploader.Texture, _outputRT, _outputMat);
 
             _lastUploadedFrame = readFrame;
         }

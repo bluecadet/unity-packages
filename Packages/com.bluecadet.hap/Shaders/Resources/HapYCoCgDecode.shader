@@ -24,7 +24,8 @@ Shader "Hidden/Bluecadet/HapYCoCgDecode"
             //   A = Y   (luma, stored in DXT5 alpha for higher precision)
             fixed4 frag(v2f_img i) : SV_Target
             {
-                half4 s = tex2D(_MainTex, i.uv);
+                // Flip V to correct DXT orientation (same root cause as HapFlip.shader)
+                half4 s = tex2D(_MainTex, float2(i.uv.x, 1.0 - i.uv.y));
                 // Recover the scale factor: re-quantize B to the nearest stored multiple of 8/255
                 float scale = 1.0 / (floor(s.b * 255.0 / 8.0 + 0.5) * (8.0 / 255.0) + 1.0);
                 float Co = (s.r - 128.0 / 255.0) * scale;
