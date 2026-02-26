@@ -16,9 +16,14 @@ set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
 
-# Enable AVX2 SIMD in Snappy's decompressor (speeds up bulk memcpy operations
-# inside Snappy's copy instructions). Requires a Haswell-or-later CPU (2013+).
-set(SNAPPY_REQUIRE_AVX2 ON CACHE BOOL "" FORCE)
+# Enable AVX2 SIMD in Snappy's decompressor on x86_64 only (speeds up bulk
+# memcpy operations inside Snappy's copy instructions). Requires a
+# Haswell-or-later CPU (2013+). Not available on ARM64 (Apple Silicon).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    set(SNAPPY_REQUIRE_AVX2 ON CACHE BOOL "" FORCE)
+else()
+    set(SNAPPY_REQUIRE_AVX2 OFF CACHE BOOL "" FORCE)
+endif()
 
 add_subdirectory(vendor/snappy)
 
