@@ -96,6 +96,14 @@ namespace Bluecadet.Hap
         /// <summary>Frame index of the last frame uploaded to the texture (to avoid redundant uploads).</summary>
         int _lastUploadedFrame = -1;
 
+        /// <summary>
+        /// Unity frame count when the video was last opened. We skip GPU uploads in the same frame
+        /// as Open() because D3D12 requires at least one command-list flush between RenderTexture.Create()
+        /// and the first Graphics.Blit that targets it — otherwise the GPU encounters an uninitialized
+        /// render target in the same command buffer and removes the device.
+        /// </summary>
+        int _openedFrame = -1;
+
         // ─────────────────────────────────────────────────────────────────────
         // Background decode thread coordination
         // ─────────────────────────────────────────────────────────────────────
@@ -351,9 +359,14 @@ namespace Bluecadet.Hap
         /// <summary>Close current file (if any) and open a new one.</summary>
         public void Open(string path)
         {
+            string prevPath = filePath;
             Close();
             filePath = path;
             Open();
+            // If open failed, restore the previous path so a future OnEnable retries the
+            // last known-good file rather than permanently recording an invalid one.
+            if (!IsOpen)
+                filePath = prevPath;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -439,6 +452,7 @@ namespace Bluecadet.Hap
 
             _clock = 0f;
             _lastUploadedFrame = -1;
+            _openedFrame = UnityEngine.Time.frameCount;
 
             // Start background decode thread
             _decodeExited.Reset();
@@ -467,10 +481,17 @@ namespace Bluecadet.Hap
             lock (_decodeLock)
                 Monitor.Pulse(_decodeLock);
 
-            // Wait for decode thread to exit before disposing shared resources
+            // Wait for the decode thread to finish its current frame and exit cleanly before
+            // freeing any resources it may be using. No timeout is used because proceeding
+            // early risks a use-after-free inside hap_decode_frame on the native side.
+            //
+            // Trade-off: if the underlying file I/O stalls (e.g. a stuck network mount or
+            // an OS-suspended disk during application quit), this call can hang indefinitely.
+            // In practice hap_decode_frame is bounded by the OS's own I/O timeout, but be
+            // aware of this when closing players that are reading from unreliable storage.
             if (_decodeThread != null)
             {
-                _decodeExited.Wait(2000);
+                _decodeExited.Wait();
                 _decodeThread = null;
             }
 
@@ -545,6 +566,13 @@ namespace Bluecadet.Hap
         /// </summary>
         void DecodeLoop()
         {
+            // Capture fields that must remain valid for the lifetime of this thread.
+            // Close() waits for us to exit before freeing these, but capturing locals makes
+            // the lifetime dependency explicit and safe against future refactors.
+            IntPtr handle = _handle;
+            int frameBufferSize = _frameBufferSize;
+            HapFrameRingBuffer ringBuffer = _ringBuffer;
+
             try
             {
                 int lastDecoded = -1;
@@ -564,9 +592,6 @@ namespace Bluecadet.Hap
                     }
 
                     if (target == lastDecoded) continue;
-
-                    // Get ring buffer (may be null if Close() was called)
-                    var ringBuffer = _ringBuffer;
                     if (ringBuffer == null) break;
 
                     // Decode into the ring buffer's write slot
@@ -574,7 +599,7 @@ namespace Bluecadet.Hap
                     int result;
                     using (s_DecodeMarker.Auto())
                     {
-                        result = HapNative.hap_decode_frame(_handle, target, buf, _frameBufferSize);
+                        result = HapNative.hap_decode_frame(handle, target, buf, frameBufferSize);
                     }
 
                     if (result == HapNative.ErrorNone)
@@ -605,12 +630,15 @@ namespace Bluecadet.Hap
             var ringBuffer = _ringBuffer;
             if (ringBuffer == null) return;
 
-            // Check if there's a new frame to upload
-            int readFrame = ringBuffer.ReadFrame;
-            if (readFrame < 0 || readFrame == _lastUploadedFrame) return;
+            // Skip GPU uploads in the same frame that Open() ran. D3D12 requires at least one
+            // command-list flush between RenderTexture.Create() and the first blit that targets it.
+            if (UnityEngine.Time.frameCount == _openedFrame) return;
 
-            IntPtr ptr = ringBuffer.ReadPtr;
-            if (ptr == IntPtr.Zero) return;
+            // Snapshot both frame index and pointer from the same _readIndex capture.
+            // Separate ReadFrame / ReadPtr calls would each re-read _readIndex, which the
+            // decode thread can change between them, producing a mismatched frame/pointer pair.
+            if (!ringBuffer.TryRead(out int readFrame, out IntPtr ptr)) return;
+            if (readFrame == _lastUploadedFrame) return;
 
             // Upload the raw DXT/BC7 data to the texture
             _uploader.Upload(ptr, _frameBufferSize);

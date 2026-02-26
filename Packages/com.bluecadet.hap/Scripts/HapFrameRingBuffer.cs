@@ -11,7 +11,7 @@ namespace Bluecadet.Hap
     /// Design:
     /// - 3 slots of native memory, each large enough to hold one decoded frame
     /// - Writer (decode thread) writes to WritePtr, then calls CommitWrite
-    /// - Reader (main thread) reads from ReadPtr/ReadFrame
+    /// - Reader (main thread) reads from TryRead (atomic snapshot of both frame index and pointer)
     /// - No locks during steady-state operation — uses volatile + memory barriers
     ///
     /// The 3-slot design ensures the writer always has a slot to write to that isn't
@@ -40,7 +40,12 @@ namespace Bluecadet.Hap
         /// </summary>
         volatile int _readIndex = -1;
 
-        bool _disposed;
+        /// <summary>
+        /// 0 = not disposed, 1 = disposed.
+        /// Int rather than bool so Interlocked.CompareExchange can guard the free loop
+        /// against concurrent calls from Dispose() and the GC finalizer.
+        /// </summary>
+        int _disposed;
 
         public int SlotSize => _slotSize;
 
@@ -99,46 +104,38 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
-        /// Pointer to the most recently committed frame data.
-        /// Returns IntPtr.Zero if no frame has been committed yet.
+        /// Snapshot the current read slot atomically, returning both the frame index and data
+        /// pointer from the same _readIndex capture. Prefer this over separate ReadFrame /
+        /// ReadPtr calls to avoid a TOCTOU race where _readIndex could change between the two.
         ///
+        /// Returns false if no frame has been committed yet.
         /// Thread safety: Called only from the main thread.
         /// </summary>
-        public IntPtr ReadPtr
+        public bool TryRead(out int frameIndex, out IntPtr ptr)
         {
-            get
+            int idx = _readIndex;
+            if (idx < 0)
             {
-                int idx = _readIndex;
-                return idx >= 0 ? _slots[idx] : IntPtr.Zero;
+                frameIndex = -1;
+                ptr = IntPtr.Zero;
+                return false;
             }
+
+            // Memory barrier ensures we read frameIndex and ptr after the slot index
+            Thread.MemoryBarrier();
+            frameIndex = _frameIndices[idx];
+            ptr = _slots[idx];
+            return true;
         }
 
         /// <summary>
-        /// Frame index of the most recently committed frame.
-        /// Returns -1 if no frame has been committed yet.
-        ///
-        /// Thread safety: Called only from the main thread.
-        /// </summary>
-        public int ReadFrame
-        {
-            get
-            {
-                int idx = _readIndex;
-                if (idx < 0) return -1;
-
-                // Memory barrier ensures we read the frame index after the slot index
-                Thread.MemoryBarrier();
-                return _frameIndices[idx];
-            }
-        }
-
-        /// <summary>
-        /// Free all native memory. Safe to call multiple times.
+        /// Free all native memory. Safe to call multiple times and from any thread —
+        /// Interlocked.CompareExchange ensures only the first caller runs the free loop.
         /// </summary>
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
+                return;
 
             for (int i = 0; i < SlotCount; i++)
             {

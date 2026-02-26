@@ -73,9 +73,9 @@ namespace Bluecadet.Hap.Editor
 
                 EditorGUILayout.Space();
 
-                float time = player.Time;
-                float newTime = EditorGUILayout.Slider("Scrub", time, 0f, player.Duration);
-                if (!Mathf.Approximately(newTime, time))
+                EditorGUI.BeginChangeCheck();
+                float newTime = EditorGUILayout.Slider("Scrub", player.Time, 0f, player.Duration);
+                if (EditorGUI.EndChangeCheck())
                     player.Time = newTime;
 
                 EditorGUILayout.Space();
@@ -89,8 +89,9 @@ namespace Bluecadet.Hap.Editor
                     player.Stop();
                 EditorGUILayout.EndHorizontal();
 
-                if (player.IsPlaying)
-                    Repaint();
+                // Repaint continuously while the player is open so the Time label and scrubber
+                // stay in sync whether the video is playing or scrubbed while paused.
+                Repaint();
             }
 
             serializedObject.ApplyModifiedProperties();

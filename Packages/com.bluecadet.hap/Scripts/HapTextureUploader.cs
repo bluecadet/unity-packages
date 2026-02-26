@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using UnityEngine;
 using Unity.Profiling;
 
@@ -19,7 +20,12 @@ namespace Bluecadet.Hap
         static readonly ProfilerMarker s_ApplyMarker = new ProfilerMarker("HapPlayer.TextureApply");
 
         Texture2D _texture;
-        bool _disposed;
+
+        /// <summary>
+        /// 0 = not disposed, 1 = disposed. Int so Interlocked.CompareExchange can guard
+        /// against double-Destroy if Dispose() is ever called concurrently.
+        /// </summary>
+        int _disposed;
 
         /// <summary>The texture containing the current video frame.</summary>
         public Texture2D Texture => _texture;
@@ -84,12 +90,12 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
-        /// Destroy the texture and free GPU resources.
+        /// Destroy the texture and free GPU resources. Safe to call multiple times.
         /// </summary>
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
+                return;
 
             if (_texture != null)
             {
