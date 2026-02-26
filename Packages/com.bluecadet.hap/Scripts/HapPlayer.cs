@@ -116,6 +116,12 @@ namespace Bluecadet.Hap
         /// <summary>The frame index the main thread wants decoded next. The decode thread watches this.</summary>
         volatile int _decodeTargetFrame = -1;
 
+        /// <summary>
+        /// Sign of the current playback direction: +1 for forward, -1 for reverse.
+        /// Written by the main thread, read by the decode thread to orient pre-fetching.
+        /// </summary>
+        volatile int _decodeDirection = 1;
+
         /// <summary>Lock for coordinating between main thread and decode thread.</summary>
         readonly object _decodeLock = new object();
 
@@ -150,6 +156,9 @@ namespace Bluecadet.Hap
         // Profiler markers (visible in Unity Profiler)
         // ─────────────────────────────────────────────────────────────────────
 
+        /// <summary>Speed values whose absolute value is below this are treated as zero (paused).</summary>
+        const float k_PlaybackSpeedEpsilon = 1e-5f;
+
         static readonly ProfilerMarker s_UpdateMarker     = new ProfilerMarker("HapPlayer.Update");
         static readonly ProfilerMarker s_UploadMarker     = new ProfilerMarker("HapPlayer.UploadFrame");
         static readonly ProfilerMarker s_RenderMarker     = new ProfilerMarker("HapPlayer.Render");
@@ -176,7 +185,7 @@ namespace Bluecadet.Hap
         /// </summary>
         public Texture Texture => _outputRT != null ? (Texture)_outputRT : (Texture)_uploader?.Texture;
 
-        public bool IsPlaying => _playing;
+        public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
         public bool IsOpen => _handle != IntPtr.Zero;
         public int FrameCount => _frameCount;
         public float Duration => _duration;
@@ -209,11 +218,15 @@ namespace Bluecadet.Hap
             set => timeSource = value;
         }
 
-        /// <summary>Playback speed multiplier. Clamped to >= 0 (no reverse playback).</summary>
+        /// <summary>
+        /// Playback speed multiplier. Negative values play in reverse. 0 is treated as paused.
+        /// To play in reverse, set a negative speed before calling <see cref="Play"/>.
+        /// If the current position is at 0, <see cref="Play"/> automatically seeks to the end.
+        /// </summary>
         public float PlaybackSpeed
         {
             get => playbackSpeed;
-            set => playbackSpeed = Mathf.Max(0f, value);
+            set => playbackSpeed = value;
         }
 
         public RenderTexture TargetRenderTexture
@@ -273,15 +286,15 @@ namespace Bluecadet.Hap
 
         void UpdatePlayback()
         {
-            // Advance playback clock if playing
-            if (_playing)
+            // Advance playback clock if playing (speed == 0 is treated as paused)
+            if (_playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon)
             {
                 float dt = timeSource == HapTimeSource.UnscaledGameTime
                     ? UnityEngine.Time.unscaledDeltaTime
                     : UnityEngine.Time.deltaTime;
                 _clock += dt * playbackSpeed;
 
-                // Handle end of video
+                // Handle boundary (forward: past end, reverse: before start)
                 if (_clock >= _duration)
                 {
                     if (loop)
@@ -296,8 +309,25 @@ namespace Bluecadet.Hap
                         PlaybackCompleted?.Invoke();
                     }
                 }
+                else if (_clock < 0f)
+                {
+                    if (loop)
+                    {
+                        // ((_clock % _duration) + _duration) % _duration maps any negative clock
+                        // into [0, _duration), including exact multiples of _duration.
+                        _clock = ((_clock % _duration) + _duration) % _duration;
+                        PlaybackLooped?.Invoke();
+                    }
+                    else
+                    {
+                        _clock = 0f;
+                        _playing = false;
+                        PlaybackCompleted?.Invoke();
+                    }
+                }
 
-                // Tell the decode thread which frame we need
+                // Tell the decode thread the current direction and which frame we need.
+                _decodeDirection = playbackSpeed > 0f ? 1 : -1;
                 int frame = ClockToFrame(_clock);
                 RequestDecode(frame);
             }
@@ -340,6 +370,14 @@ namespace Bluecadet.Hap
         public void Play()
         {
             if (!IsOpen) return;
+            // When starting reverse playback from position 0, jump to the end so the first
+            // Update doesn't immediately hit the start-of-video boundary.
+            if (playbackSpeed < -k_PlaybackSpeedEpsilon && _clock <= 0f)
+            {
+                _clock = _duration;
+                if (_frameCount > 0)
+                    RequestDecode(ClockToFrame(_clock));
+            }
             _playing = true;
         }
 
@@ -348,7 +386,7 @@ namespace Bluecadet.Hap
             _playing = false;
         }
 
-        /// <summary>Stop playback and reset to the beginning.</summary>
+        /// <summary>Stop playback and reset to frame 0, regardless of playback direction.</summary>
         public void Stop()
         {
             _playing = false;
@@ -604,6 +642,10 @@ namespace Bluecadet.Hap
                     int target;
                     bool isPrefetch;
 
+                    // Snapshot direction once per iteration (volatile, no lock needed).
+                    // dir = +1 for forward playback, -1 for reverse.
+                    int dir = _decodeDirection;
+
                     lock (_decodeLock)
                     {
                         int requested = _decodeTargetFrame;
@@ -618,7 +660,7 @@ namespace Bluecadet.Hap
                                 // previous one. A seek that happens to land on the pre-fetched slot
                                 // should not blindly pre-fetch the frame after it.
                                 bool wasSeq = lastExplicit < 0 ||
-                                              requested == (lastExplicit + 1) % frameCount;
+                                              requested == (lastExplicit + dir + frameCount) % frameCount;
                                 lastExplicit = requested;
                                 prefetchDone = !wasSeq;
                                 // target == -1 is the sentinel meaning "already buffered, skip decode"
@@ -635,8 +677,8 @@ namespace Bluecadet.Hap
                         else if (!prefetchDone && lastDecoded >= 0 && frameCount > 1)
                         {
                             // Caught up with the main thread. Pre-fetch the next sequential
-                            // frame without waiting so it's ready before it's requested.
-                            target = (lastDecoded + 1) % frameCount;
+                            // frame (in the current direction) so it's ready before it's requested.
+                            target = (lastDecoded + dir + frameCount) % frameCount;
                             isPrefetch = true;
                         }
                         else
@@ -694,14 +736,12 @@ namespace Bluecadet.Hap
                         }
                         else
                         {
-                            // Only pre-fetch if this was a sequential step (normal playback).
-                            // After a seek/scrub the next request is unpredictable, so skip
-                            // the pre-fetch — don't waste a decode slot on the wrong frame.
-                            // The modulo handles the loop boundary correctly: when the last
-                            // frame (frameCount-1) wraps to frame 0, the expression evaluates
-                            // to true so the loop boundary is treated as sequential.
+                            // Only pre-fetch if this was a sequential step in the current
+                            // direction. After a seek/scrub the next request is unpredictable,
+                            // so skip the pre-fetch — don't waste a decode slot on the wrong frame.
+                            // dir handles both directions: +1 for forward, -1 for reverse.
                             bool wasSequential = lastExplicit < 0 ||
-                                                 target == (lastExplicit + 1) % frameCount;
+                                                 target == (lastExplicit + dir + frameCount) % frameCount;
                             lastExplicit = target;
                             prefetchDone = !wasSequential;
                         }
