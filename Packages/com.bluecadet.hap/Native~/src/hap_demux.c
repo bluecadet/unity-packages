@@ -1,51 +1,167 @@
 /*
- * hap_demux.c — MOV/MP4 demuxer using minimp4
+ * hap_demux.c — MOV/MP4 demuxer using minimp4, with memory-mapped I/O
+ *
+ * Using memory-mapped files instead of fseek/fread eliminates per-frame seek
+ * overhead, which is the dominant cost during scrubbing. The OS page cache
+ * naturally retains recently-visited frames, and the kernel handles sequential
+ * read-ahead during normal linear playback automatically.
+ *
+ * All frame offsets and sizes are pre-cached at open time so that
+ * hap_demux_read_sample is O(1) regardless of container complexity.
  */
 
 #include "hap_demux.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* 64-bit fseek/ftell portability */
+/* ── Platform-specific memory-mapped file ───────────────────────────────── */
+
 #ifdef _WIN32
-  #define fseek64(f, off, w) _fseeki64((f), (off), (w))
-  #define ftell64(f)         _ftelli64((f))
-#else
-  #define fseek64(f, off, w) fseeko((f), (off_t)(off), (w))
-  #define ftell64(f)         ((int64_t)ftello((f)))
-#endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+
+typedef struct {
+    HANDLE file_handle;
+    HANDLE mapping_handle;
+} PlatformFile;
+
+static int mapped_file_open(PlatformFile *pf, const char *path,
+                             const uint8_t **out_data, int64_t *out_size)
+{
+    pf->file_handle    = INVALID_HANDLE_VALUE;
+    pf->mapping_handle = NULL;
+
+    /* FILE_FLAG_RANDOM_ACCESS tells Windows not to bother with sequential
+     * read-ahead prefetch, which is counter-productive during scrubbing. */
+    pf->file_handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ,
+                                   NULL, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                                   NULL);
+    if (pf->file_handle == INVALID_HANDLE_VALUE) return 0;
+
+    LARGE_INTEGER li;
+    if (!GetFileSizeEx(pf->file_handle, &li) || li.QuadPart == 0)
+        goto fail;
+
+    pf->mapping_handle = CreateFileMapping(pf->file_handle, NULL,
+                                            PAGE_READONLY, 0, 0, NULL);
+    if (!pf->mapping_handle) goto fail;
+
+    *out_data = (const uint8_t *)MapViewOfFile(pf->mapping_handle,
+                                                FILE_MAP_READ, 0, 0, 0);
+    if (!*out_data) goto fail;
+
+    *out_size = (int64_t)li.QuadPart;
+    return 1;
+
+fail:
+    if (pf->mapping_handle) { CloseHandle(pf->mapping_handle); pf->mapping_handle = NULL; }
+    if (pf->file_handle != INVALID_HANDLE_VALUE) { CloseHandle(pf->file_handle); pf->file_handle = INVALID_HANDLE_VALUE; }
+    return 0;
+}
+
+static void mapped_file_close(PlatformFile *pf, const uint8_t *data, int64_t size)
+{
+    (void)size;
+    if (data)                  UnmapViewOfFile(data);
+    if (pf->mapping_handle)    CloseHandle(pf->mapping_handle);
+    if (pf->file_handle != INVALID_HANDLE_VALUE) CloseHandle(pf->file_handle);
+}
+
+#else /* POSIX ──────────────────────────────────────────────────────────── */
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+typedef struct { int fd; } PlatformFile;
+
+static int mapped_file_open(PlatformFile *pf, const char *path,
+                             const uint8_t **out_data, int64_t *out_size)
+{
+    pf->fd = open(path, O_RDONLY);
+    if (pf->fd < 0) return 0;
+
+    struct stat st;
+    if (fstat(pf->fd, &st) != 0 || st.st_size == 0) {
+        close(pf->fd); pf->fd = -1;
+        return 0;
+    }
+
+    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, pf->fd, 0);
+    if (p == MAP_FAILED) {
+        close(pf->fd); pf->fd = -1;
+        return 0;
+    }
+
+    /* The fd can be closed once mapped; the mapping remains valid. */
+    close(pf->fd);
+    pf->fd = -1;
+
+    *out_data = (const uint8_t *)p;
+    *out_size = (int64_t)st.st_size;
+    return 1;
+}
+
+static void mapped_file_close(PlatformFile *pf, const uint8_t *data, int64_t size)
+{
+    (void)pf;
+    if (data && size > 0) munmap((void *)data, (size_t)size);
+}
+
+#endif /* _WIN32 / POSIX */
+
+/* ── minimp4 ─────────────────────────────────────────────────────────────── */
 
 #define MINIMP4_ALLOW_64BIT 1
 #define MP4D_64BIT_SUPPORTED 1
 #define MINIMP4_IMPLEMENTATION
 #include "minimp4.h"
 
+/* ── HapDemux struct ─────────────────────────────────────────────────────── */
+
 struct HapDemux {
-    FILE          *file;
-    int64_t        file_size;
-    MP4D_demux_t   mp4;
-    int            track_index;
-    int            width;
-    int            height;
-    int            frame_count;
-    float          frame_rate;
-    int            max_sample_size;
+    /* Memory-mapped file */
+    PlatformFile        pf;
+    const uint8_t      *mapped_data;
+    int64_t             mapped_size;
+
+    /* minimp4 demux state */
+    MP4D_demux_t        mp4;
+    int                 track_index;
+
+    /* Video metadata */
+    int                 width;
+    int                 height;
+    int                 frame_count;
+    float               frame_rate;
+    int                 max_sample_size;
+
+    /* Pre-cached per-frame layout for O(1) random access during scrubbing */
+    MP4D_file_offset_t *frame_offsets;
+    unsigned            *frame_sizes;
 };
+
+/* ── minimp4 read callback ───────────────────────────────────────────────── */
 
 static int mp4_read_callback(int64_t offset, void *buffer, size_t size, void *token)
 {
-    FILE *f = (FILE *)token;
-    if (fseek64(f, offset, SEEK_SET) != 0)
-        return -1;
-    size_t rd = fread(buffer, 1, size, f);
-    return (rd == size) ? 0 : -1;
+    HapDemux *d = (HapDemux *)token;
+    if (offset < 0 || size == 0) return -1;
+    if ((uint64_t)offset + size > (uint64_t)d->mapped_size) return -1;
+    memcpy(buffer, d->mapped_data + (size_t)offset, size);
+    return 0;
 }
+
+/* ── Byte helpers ────────────────────────────────────────────────────────── */
 
 static uint32_t read_be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+           ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
 }
 
 static uint16_t read_be16(const uint8_t *p)
@@ -53,97 +169,74 @@ static uint16_t read_be16(const uint8_t *p)
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
 
+/* ── stsd dimension parser ───────────────────────────────────────────────── */
+
 /*
- * Search the moov atom for the stsd box of a given track and extract
- * the VisualSampleEntry width/height. Works for any FourCC (Hap1, HapY, etc).
+ * Walk moov > trak[track_idx] > ... > stsd and extract the VisualSampleEntry
+ * width/height. Uses direct mapped-memory access — no malloc, no fseek.
  *
  * VisualSampleEntry layout (ISO 14496-12):
- *   uint8[6] reserved
- *   uint16   data_reference_index
- *   uint16   pre_defined
- *   uint16   reserved
+ *   uint8[6]  reserved
+ *   uint16    data_reference_index
+ *   uint16    pre_defined
+ *   uint16    reserved
  *   uint32[3] pre_defined
- *   uint16   width
- *   uint16   height
- *   ... (the rest we don't need)
+ *   uint16    width
+ *   uint16    height
+ *   ... (ignored)
  */
-static int parse_stsd_dimensions(FILE *f, int64_t file_size,
-                                  MP4D_demux_t *mp4, int track_idx,
-                                  int *out_w, int *out_h)
+static int parse_stsd_dimensions(const uint8_t *data, int64_t file_size,
+                                  int track_idx, int *out_w, int *out_h)
 {
-    /* The track's stsd_data may be populated by minimp4. If not, we search manually.
-     * minimp4 stores per-sample offsets; we can get the first sample and look backwards,
-     * but it's simpler to just search the file for the stsd of this track.
-     *
-     * Alternative approach: read the first frame data and use HapGetFrameTextureFormat,
-     * but that doesn't give us dimensions.
-     *
-     * Simplest reliable approach: use minimp4's internal stsd pointer if available,
-     * otherwise scan the moov for stsd. Since minimp4 doesn't expose stsd directly,
-     * we'll scan. */
-
-    /* Find moov atom */
-    int64_t pos = 0;
+    /* Locate the 'moov' atom */
+    int64_t pos         = 0;
     int64_t moov_offset = -1;
-    int64_t moov_size = 0;
-    uint8_t hdr[16];
+    int64_t moov_size   = 0;
 
-    while (pos < file_size) {
-        if (fseek64(f, pos, SEEK_SET) != 0) break;
-        if (fread(hdr, 1, 8, f) != 8) break;
-
-        uint64_t sz = read_be32(hdr);
+    while (pos + 8 <= file_size) {
+        const uint8_t *hdr = data + pos;
+        uint64_t sz  = read_be32(hdr);
         uint32_t typ = read_be32(hdr + 4);
 
         if (sz == 1) {
-            if (fread(hdr + 8, 1, 8, f) != 8) break;
+            if (pos + 16 > file_size) break;
             sz = ((uint64_t)read_be32(hdr + 8) << 32) | read_be32(hdr + 12);
         }
         if (sz == 0) sz = (uint64_t)(file_size - pos);
+        if (sz < 8)  break;
 
         if (typ == 0x6d6f6f76) { /* 'moov' */
             moov_offset = pos + 8;
-            moov_size = (int64_t)sz - 8;
+            /* sz is uint64_t; guard against values that exceed INT64_MAX before
+             * narrowing to int64_t.  A moov atom that large is impossible in
+             * practice (it would be larger than any real file), but a malformed
+             * file could set the field to an extreme value. */
+            if (sz - 8 > (uint64_t)INT64_MAX) break;
+            moov_size   = (int64_t)(sz - 8);
             break;
         }
         pos += (int64_t)sz;
     }
 
-    if (moov_offset < 0) return 0;
+    if (moov_offset < 0 || moov_offset + moov_size > file_size) return 0;
 
-    /* Read moov into memory */
-    if (moov_size > 64 * 1024 * 1024) return 0; /* safety limit */
-    uint8_t *moov = (uint8_t *)malloc((size_t)moov_size);
-    if (!moov) return 0;
+    /* The moov atom is directly accessible in the mapping — no copy needed. */
+    const uint8_t *moov = data + moov_offset;
 
-    if (fseek64(f, moov_offset, SEEK_SET) != 0 ||
-        fread(moov, 1, (size_t)moov_size, f) != (size_t)moov_size) {
-        free(moov);
-        return 0;
-    }
-
-    /* Find the Nth trak, then its stsd */
-    int trak_count = 0;
-    int found = 0;
-
-    /* Simple recursive atom scanner */
-    /* We need: moov > trak[track_idx] > mdia > minf > stbl > stsd */
-    /* For simplicity, find all 'stsd' atoms and pick the one in our track */
-
-    /* Count which trak we're in by finding trak boundaries */
-    /* Walk top-level children of moov to find trak #track_idx */
+    /* Find trak #track_idx among moov's top-level children */
     int64_t trak_start = -1, trak_end = -1;
     int64_t off = 0;
     int trak_n = 0;
-    while (off < moov_size) {
-        if (off + 8 > moov_size) break;
-        uint32_t bsz = read_be32(moov + off);
+
+    while (off + 8 <= moov_size) {
+        uint32_t bsz  = read_be32(moov + off);
         uint32_t btyp = read_be32(moov + off + 4);
         if (bsz < 8 || off + bsz > moov_size) break;
+
         if (btyp == 0x7472616b) { /* 'trak' */
             if (trak_n == track_idx) {
                 trak_start = off + 8;
-                trak_end = off + bsz;
+                trak_end   = off + bsz;
                 break;
             }
             trak_n++;
@@ -151,105 +244,84 @@ static int parse_stsd_dimensions(FILE *f, int64_t file_size,
         off += bsz;
     }
 
-    if (trak_start < 0) { free(moov); return 0; }
+    if (trak_start < 0) return 0;
 
-    /* Search recursively within this trak for 'stsd' */
-    /* Simple: just scan for the 4-byte pattern 'stsd' and validate */
-    for (int64_t s = trak_start; s < trak_end - 8; s++) {
-        if (read_be32(moov + s + 4) == 0x73747364) { /* 'stsd' */
-            uint32_t stsd_sz = read_be32(moov + s);
-            if (stsd_sz < 24 || s + stsd_sz > trak_end) continue;
+    /* Scan the trak body for the 'stsd' box */
+    for (int64_t s = trak_start; s + 8 <= trak_end; s++) {
+        if (read_be32(moov + s + 4) != 0x73747364) continue; /* 'stsd' */
 
-            /* stsd: version(1) + flags(3) + entry_count(4) = 8 bytes after box header */
-            int64_t entry_off = s + 8 + 8; /* box header + fullbox fields + entry_count */
-            /* Actually: s+8 = after box header, +4 = version/flags, +4 = entry_count */
-            /* Entry starts at s + 16 */
-            entry_off = s + 16;
+        uint32_t stsd_sz = read_be32(moov + s);
+        if (stsd_sz < 24 || s + stsd_sz > trak_end) continue;
 
-            if (entry_off + 8 > trak_end) continue;
+        /* stsd: box header(8) + version/flags(4) + entry_count(4) = 16 bytes before first entry */
+        int64_t entry_off = s + 16;
+        if (entry_off + 8 > trak_end) continue;
 
-            uint32_t entry_sz = read_be32(moov + entry_off);
-            /* uint32_t entry_fourcc = read_be32(moov + entry_off + 4); */
+        uint32_t entry_sz = read_be32(moov + entry_off);
+        if (entry_sz < 40 || entry_off + entry_sz > trak_end) continue;
 
-            if (entry_sz < 40 || entry_off + entry_sz > trak_end) continue;
+        /* VisualSampleEntry offset within entry: header(8) + reserved(6) + dri(2) + pre_def(2) + reserved(2) + pre_def3(12) = 32 */
+        int64_t dim_off = entry_off + 32;
+        if (dim_off + 4 > trak_end) continue;
 
-            /* VisualSampleEntry: offset +8(header) +6(reserved) +2(dri) +2+2+12 = +32 from entry start */
-            int64_t dim_off = entry_off + 8 + 6 + 2 + 2 + 2 + 12;
-            if (dim_off + 4 > trak_end) continue;
-
-            *out_w = read_be16(moov + dim_off);
-            *out_h = read_be16(moov + dim_off + 2);
-
-            if (*out_w > 0 && *out_h > 0) {
-                found = 1;
-                break;
-            }
+        int w = (int)read_be16(moov + dim_off);
+        int h = (int)read_be16(moov + dim_off + 2);
+        if (w > 0 && h > 0) {
+            *out_w = w;
+            *out_h = h;
+            return 1;
         }
     }
 
-    free(moov);
-    return found;
+    return 0;
 }
+
+/* ── Public API ──────────────────────────────────────────────────────────── */
 
 HapDemux *hap_demux_open(const char *path)
 {
     if (!path) return NULL;
 
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-
-    fseek64(f, 0, SEEK_END);
-    int64_t fsize = ftell64(f);
-    fseek64(f, 0, SEEK_SET);
-
-    if (fsize <= 0) {
-        fclose(f);
-        return NULL;
-    }
-
     HapDemux *d = (HapDemux *)calloc(1, sizeof(HapDemux));
-    if (!d) {
-        fclose(f);
-        return NULL;
-    }
+    if (!d) return NULL;
 
-    d->file = f;
-    d->file_size = fsize;
-
-    if (MP4D_open(&d->mp4, mp4_read_callback, f, fsize) == 0) {
-        fclose(f);
+    /* Map the entire file into virtual memory */
+    if (!mapped_file_open(&d->pf, path, &d->mapped_data, &d->mapped_size)) {
         free(d);
         return NULL;
     }
 
-    /* Find the first track with samples that has video dimensions.
-     * minimp4 may not identify HAP tracks as video, so we parse stsd ourselves. */
+    /* Parse the MP4/MOV container */
+    if (MP4D_open(&d->mp4, mp4_read_callback, d, d->mapped_size) == 0) {
+        mapped_file_close(&d->pf, d->mapped_data, d->mapped_size);
+        free(d);
+        return NULL;
+    }
+
+    /* Find the video track */
     d->track_index = -1;
     for (int i = 0; i < (int)d->mp4.track_count; i++) {
         MP4D_track_t *track = &d->mp4.track[i];
 
-        /* First check if minimp4 already got the dimensions */
         if (track->handler_type == MP4D_HANDLER_TYPE_VIDE &&
             track->SampleDescription.video.width > 0) {
             d->track_index = i;
-            d->width = track->SampleDescription.video.width;
+            d->width  = track->SampleDescription.video.width;
             d->height = track->SampleDescription.video.height;
         } else if (track->sample_count > 0) {
-            /* Try parsing stsd ourselves for HAP/unknown codecs */
             int w = 0, h = 0;
-            if (parse_stsd_dimensions(f, fsize, &d->mp4, i, &w, &h) && w > 0 && h > 0) {
+            if (parse_stsd_dimensions(d->mapped_data, d->mapped_size, i, &w, &h) && w > 0 && h > 0) {
                 d->track_index = i;
-                d->width = w;
+                d->width  = w;
                 d->height = h;
             }
         }
 
         if (d->track_index >= 0) {
             d->frame_count = (int)track->sample_count;
-
             if (track->duration_hi == 0 && track->duration_lo > 0) {
-                double duration_sec = (double)track->duration_lo / (double)track->timescale;
-                d->frame_rate = (float)((double)track->sample_count / duration_sec);
+                double dur = (double)track->duration_lo / (double)track->timescale;
+                d->frame_rate = (float)((double)track->sample_count / dur);
             } else {
                 d->frame_rate = 30.0f;
             }
@@ -259,18 +331,43 @@ HapDemux *hap_demux_open(const char *path)
 
     if (d->track_index < 0) {
         MP4D_close(&d->mp4);
-        fclose(f);
+        mapped_file_close(&d->pf, d->mapped_data, d->mapped_size);
         free(d);
         return NULL;
     }
 
-    /* Calculate max sample size */
+    /* Sanity cap: 16 million frames is ~155 hours at 30 fps — far beyond any
+     * real HAP file.  Reject larger values to prevent oversized allocations
+     * from a malformed container. */
+    if (d->frame_count > (1 << 24)) {
+        MP4D_close(&d->mp4);
+        mapped_file_close(&d->pf, d->mapped_data, d->mapped_size);
+        free(d);
+        return NULL;
+    }
+
+    /* Pre-cache all frame offsets and sizes.
+     * This makes hap_demux_read_sample O(1) and avoids calling MP4D_frame_offset
+     * (which walks internal tables) on every single frame during playback. */
+    d->frame_offsets = (MP4D_file_offset_t *)malloc((size_t)d->frame_count * sizeof(MP4D_file_offset_t));
+    d->frame_sizes   = (unsigned *)           malloc((size_t)d->frame_count * sizeof(unsigned));
+
+    if (!d->frame_offsets || !d->frame_sizes) {
+        free(d->frame_offsets);
+        free(d->frame_sizes);
+        MP4D_close(&d->mp4);
+        mapped_file_close(&d->pf, d->mapped_data, d->mapped_size);
+        free(d);
+        return NULL;
+    }
+
     d->max_sample_size = 0;
     for (int i = 0; i < d->frame_count; i++) {
         unsigned frame_bytes, timestamp, duration;
         MP4D_file_offset_t ofs = MP4D_frame_offset(&d->mp4, d->track_index, i,
                                                      &frame_bytes, &timestamp, &duration);
-        (void)ofs;
+        d->frame_offsets[i] = ofs;
+        d->frame_sizes[i]   = frame_bytes;
         if ((int)frame_bytes > d->max_sample_size)
             d->max_sample_size = (int)frame_bytes;
     }
@@ -281,41 +378,34 @@ HapDemux *hap_demux_open(const char *path)
 void hap_demux_close(HapDemux *d)
 {
     if (!d) return;
+    free(d->frame_offsets);
+    free(d->frame_sizes);
     MP4D_close(&d->mp4);
-    if (d->file) fclose(d->file);
+    mapped_file_close(&d->pf, d->mapped_data, d->mapped_size);
     free(d);
 }
 
-int hap_demux_get_width(HapDemux *d)       { return d ? d->width : 0; }
-int hap_demux_get_height(HapDemux *d)      { return d ? d->height : 0; }
-int hap_demux_get_frame_count(HapDemux *d) { return d ? d->frame_count : 0; }
-float hap_demux_get_frame_rate(HapDemux *d){ return d ? d->frame_rate : 0.0f; }
-int hap_demux_get_max_sample_size(HapDemux *d) { return d ? d->max_sample_size : 0; }
+int   hap_demux_get_width(HapDemux *d)          { return d ? d->width : 0; }
+int   hap_demux_get_height(HapDemux *d)         { return d ? d->height : 0; }
+int   hap_demux_get_frame_count(HapDemux *d)    { return d ? d->frame_count : 0; }
+float hap_demux_get_frame_rate(HapDemux *d)     { return d ? d->frame_rate : 0.0f; }
+int   hap_demux_get_max_sample_size(HapDemux *d){ return d ? d->max_sample_size : 0; }
 
 int hap_demux_read_sample(HapDemux *d, int frame_index, uint8_t *buf, int buf_size)
 {
     if (!d || frame_index < 0 || frame_index >= d->frame_count)
         return -1;
 
-    unsigned frame_bytes, timestamp, duration;
-    MP4D_file_offset_t ofs = MP4D_frame_offset(&d->mp4, d->track_index, frame_index,
-                                                 &frame_bytes, &timestamp, &duration);
+    /* O(1) lookup from pre-cached table — no MP4D_frame_offset call needed */
+    MP4D_file_offset_t ofs  = d->frame_offsets[frame_index];
+    unsigned frame_bytes     = d->frame_sizes[frame_index];
 
-    if (ofs == 0 || frame_bytes == 0)
-        return -1;
+    if (frame_bytes == 0 || ofs == 0) return -1;
+    if (!buf) return (int)frame_bytes;
+    if (buf_size < (int)frame_bytes) return -1;
+    if ((uint64_t)ofs + frame_bytes > (uint64_t)d->mapped_size) return -1;
 
-    if (!buf)
-        return (int)frame_bytes;
-
-    if (buf_size < (int)frame_bytes)
-        return -1;
-
-    if (fseek64(d->file, (int64_t)ofs, SEEK_SET) != 0)
-        return -1;
-
-    size_t rd = fread(buf, 1, (size_t)frame_bytes, d->file);
-    if (rd != (size_t)frame_bytes)
-        return -1;
-
+    /* Copy from mapped memory — no fseek, no fread, no syscall */
+    memcpy(buf, d->mapped_data + (size_t)ofs, frame_bytes);
     return (int)frame_bytes;
 }

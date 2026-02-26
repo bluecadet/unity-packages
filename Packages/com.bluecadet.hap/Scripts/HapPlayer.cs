@@ -460,7 +460,10 @@ namespace Bluecadet.Hap
             _decodeThread = new Thread(DecodeLoop)
             {
                 IsBackground = true,
-                Name = "HapDecode"
+                Name = "HapDecode",
+                // AboveNormal reduces wake-up scheduling latency, which is
+                // measurably worse on Windows than macOS at default priority.
+                Priority = System.Threading.ThreadPriority.AboveNormal,
             };
             _decodeThread.Start();
 
@@ -546,11 +549,13 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Tell the decode thread which frame we want. Called from main thread.
+        /// Only pulses the decode thread if the target actually changed.
         /// </summary>
         void RequestDecode(int frame)
         {
             lock (_decodeLock)
             {
+                if (_decodeTargetFrame == frame) return;
                 _decodeTargetFrame = frame;
                 Monitor.Pulse(_decodeLock);  // Wake up decode thread
             }
@@ -559,10 +564,22 @@ namespace Bluecadet.Hap
         /// <summary>
         /// Background thread: waits for frame requests, decodes them, and commits to ring buffer.
         ///
-        /// Flow:
-        /// 1. Wait for _decodeTargetFrame to change (or exit signal)
-        /// 2. Decode the requested frame into the ring buffer's write slot
-        /// 3. Commit the decoded frame to make it available to the main thread
+        /// Two separate counters prevent a re-decode spin that would otherwise occur when
+        /// look-ahead is added:
+        ///   lastExplicit — the last frame index the main thread requested that we satisfied
+        ///                  (either by decoding it, or by finding it already in the buffer).
+        ///   lastDecoded  — the most recently written ring-buffer slot (may be a pre-fetch).
+        ///
+        /// Flow each iteration:
+        ///   1. If _decodeTargetFrame != lastExplicit → main thread wants a new frame.
+        ///        If it's already in the buffer (== lastDecoded from a prior pre-fetch),
+        ///        just update lastExplicit and skip decoding; otherwise decode it.
+        ///   2. Else if no pre-fetch done yet → pre-fetch the next sequential frame so it
+        ///        is ready before the main thread asks for it (eliminates per-frame I/O stall).
+        ///   3. Else → block until main thread requests a new frame.
+        ///
+        /// This keeps the pipeline full during linear playback and still responds immediately
+        /// to seeks/scrubbing without re-decoding the same frame in a tight loop.
         /// </summary>
         void DecodeLoop()
         {
@@ -571,30 +588,75 @@ namespace Bluecadet.Hap
             // the lifetime dependency explicit and safe against future refactors.
             IntPtr handle = _handle;
             int frameBufferSize = _frameBufferSize;
+            int frameCount = _frameCount;
             HapFrameRingBuffer ringBuffer = _ringBuffer;
 
             try
             {
-                int lastDecoded = -1;
+                int lastExplicit = -1;   // last frame satisfied in response to a main-thread request
+                int lastDecoded  = -1;   // most recent frame written to the ring buffer; -1 = nothing yet.
+                                         //   The pre-fetch guard (lastDecoded >= 0) depends on this sentinel.
+                bool prefetchDone = false;
 
                 while (_decodeRunning)
                 {
                     int target;
+                    bool isPrefetch;
 
-                    // Wait for a new frame request
                     lock (_decodeLock)
                     {
-                        while (_decodeRunning && _decodeTargetFrame == lastDecoded)
-                            Monitor.Wait(_decodeLock, 100);
+                        int requested = _decodeTargetFrame;
 
-                        if (!_decodeRunning) break;
-                        target = _decodeTargetFrame;
+                        if (requested != lastExplicit)
+                        {
+                            if (requested == lastDecoded)
+                            {
+                                // Already in the ring buffer from a pre-fetch — no decode needed.
+                                // Apply the same sequential check as the explicit-decode path: only
+                                // enable pre-fetch if this request is the natural next frame from the
+                                // previous one. A seek that happens to land on the pre-fetched slot
+                                // should not blindly pre-fetch the frame after it.
+                                bool wasSeq = lastExplicit < 0 ||
+                                              requested == (lastExplicit + 1) % frameCount;
+                                lastExplicit = requested;
+                                prefetchDone = !wasSeq;
+                                // target == -1 is the sentinel meaning "already buffered, skip decode"
+                                target = -1;
+                                isPrefetch = false;
+                            }
+                            else
+                            {
+                                // Decode this frame in response to a main-thread request.
+                                target = requested;
+                                isPrefetch = false;
+                            }
+                        }
+                        else if (!prefetchDone && lastDecoded >= 0 && frameCount > 1)
+                        {
+                            // Caught up with the main thread. Pre-fetch the next sequential
+                            // frame without waiting so it's ready before it's requested.
+                            target = (lastDecoded + 1) % frameCount;
+                            isPrefetch = true;
+                        }
+                        else
+                        {
+                            // Pre-fetch done (or not applicable). Block until the main thread
+                            // requests a new frame or signals exit.
+                            while (_decodeRunning && _decodeTargetFrame == lastExplicit)
+                                Monitor.Wait(_decodeLock, 100);  // 100ms safety timeout in case Pulse is missed during a Close() race
+
+                            if (!_decodeRunning) break;
+                            target = _decodeTargetFrame;
+                            isPrefetch = false;
+                            prefetchDone = false;
+                        }
                     }
 
-                    if (target == lastDecoded) continue;
+                    // Frame was already in the ring buffer — no decode work to do.
+                    if (target == -1) continue;
                     if (ringBuffer == null) break;
 
-                    // Decode into the ring buffer's write slot
+                    // Decode into the ring buffer's write slot.
                     IntPtr buf = ringBuffer.WritePtr;
                     int result;
                     using (s_DecodeMarker.Auto())
@@ -602,11 +664,32 @@ namespace Bluecadet.Hap
                         result = HapNative.hap_decode_frame(handle, target, buf, frameBufferSize);
                     }
 
-                    if (result == HapNative.ErrorNone)
+                    if (result != HapNative.ErrorNone)
                     {
-                        // Commit the frame to make it available for upload
+                        Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}, error: {result}");
+                    }
+                    else
+                    {
                         ringBuffer.CommitWrite(target);
                         lastDecoded = target;
+
+                        if (isPrefetch)
+                        {
+                            prefetchDone = true;
+                        }
+                        else
+                        {
+                            // Only pre-fetch if this was a sequential step (normal playback).
+                            // After a seek/scrub the next request is unpredictable, so skip
+                            // the pre-fetch — don't waste a decode slot on the wrong frame.
+                            // The modulo handles the loop boundary correctly: when the last
+                            // frame (frameCount-1) wraps to frame 0, the expression evaluates
+                            // to true so the loop boundary is treated as sequential.
+                            bool wasSequential = lastExplicit < 0 ||
+                                                 target == (lastExplicit + 1) % frameCount;
+                            lastExplicit = target;
+                            prefetchDone = !wasSequential;
+                        }
                     }
                 }
             }
