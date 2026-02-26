@@ -78,6 +78,27 @@ namespace Bluecadet.Hap
         public static extern int hap_decode_frame(IntPtr h, int frameIndex, IntPtr buf, int size);
 
         /// <summary>
+        /// Split version of hap_decode_frame — step 1: read the compressed frame
+        /// from the memory-mapped file into the native internal buffer.
+        ///
+        /// Returns the number of compressed bytes read, or &lt; 0 on error.
+        /// This is where I/O time (and page-fault latency) shows up.
+        /// Must be followed by hap_decompress_frame on the same thread.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hap_read_sample(IntPtr h, int frameIndex);
+
+        /// <summary>
+        /// Split version of hap_decode_frame — step 2: Snappy-decompress the data
+        /// read by the preceding hap_read_sample call into buf.
+        ///
+        /// Returns ErrorNone on success, or an error code on failure.
+        /// This is where CPU decompression time shows up.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hap_decompress_frame(IntPtr h, IntPtr buf, int size);
+
+        /// <summary>
         /// Set the number of threads for parallel decoding (if supported by the codec).
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]

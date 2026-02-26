@@ -13,7 +13,8 @@ struct HapHandle {
     HapDecoder  *decoder;
     uint8_t     *sample_buf;
     int          sample_buf_size;
-    int          texture_format;  /* cached after first decode */
+    int          last_sample_size; /* bytes written by last hap_read_sample call */
+    int          texture_format;   /* cached after first decode */
     int          frame_buffer_size;
 };
 
@@ -151,23 +152,33 @@ int hap_get_frame_buffer_size(HapHandle *h)
     return h ? h->frame_buffer_size : 0;
 }
 
-int hap_decode_frame(HapHandle *h, int frame_index, uint8_t *buf, int size)
+int hap_read_sample(HapHandle *h, int frame_index)
 {
-    if (!h || !buf || size < h->frame_buffer_size)
+    if (!h) return -1;
+    h->last_sample_size = 0;  /* clear first so a failed read can never leave stale data */
+    int n = hap_demux_read_sample(h->demux, frame_index,
+                                   h->sample_buf, h->sample_buf_size);
+    if (n > 0) h->last_sample_size = n;
+    return n;
+}
+
+int hap_decompress_frame(HapHandle *h, uint8_t *buf, int size)
+{
+    if (!h || !buf || size < h->frame_buffer_size ||
+        h->last_sample_size <= 0 || h->last_sample_size > h->sample_buf_size)
         return HAP_ERROR_ARGS;
 
-    int sample_size = hap_demux_read_sample(h->demux, frame_index,
-                                             h->sample_buf, h->sample_buf_size);
-    if (sample_size <= 0)
-        return HAP_ERROR_FILE;
-
     int fmt = 0;
-    int ret = hap_decoder_decode(h->decoder, h->sample_buf, sample_size,
+    int ret = hap_decoder_decode(h->decoder, h->sample_buf, h->last_sample_size,
                                   buf, size, &fmt);
-    if (ret != 0)
-        return HAP_ERROR_DECODE;
+    return ret != 0 ? HAP_ERROR_DECODE : HAP_ERROR_NONE;
+}
 
-    return HAP_ERROR_NONE;
+int hap_decode_frame(HapHandle *h, int frame_index, uint8_t *buf, int size)
+{
+    int n = hap_read_sample(h, frame_index);
+    if (n <= 0) return HAP_ERROR_FILE;
+    return hap_decompress_frame(h, buf, size);
 }
 
 void hap_set_thread_count(HapHandle *h, int count)

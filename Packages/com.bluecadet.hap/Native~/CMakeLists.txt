@@ -16,6 +16,10 @@ set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
 
+# Enable AVX2 SIMD in Snappy's decompressor (speeds up bulk memcpy operations
+# inside Snappy's copy instructions). Requires a Haswell-or-later CPU (2013+).
+set(SNAPPY_REQUIRE_AVX2 ON CACHE BOOL "" FORCE)
+
 add_subdirectory(vendor/snappy)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +44,27 @@ target_include_directories(bluecadet_hap PRIVATE
 )
 
 target_link_libraries(bluecadet_hap PRIVATE snappy)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Release optimizations
+# ─────────────────────────────────────────────────────────────────────────────
+
+if(MSVC)
+    # /O2       — maximum speed (inlining, loop unrolling, auto-vectorisation)
+    # /GL       — whole-program optimisation (inlines across translation units)
+    # /arch:AVX2 — emit AVX2 instructions; enables auto-vectorisation of our
+    #              decode loops and matches the Snappy AVX2 SIMD paths above.
+    #              Requires Haswell or later (Intel 2013+, AMD 2015+).
+    target_compile_options(bluecadet_hap PRIVATE
+        $<$<CONFIG:Release>:/O2 /GL /arch:AVX2>
+        $<$<CONFIG:RelWithDebInfo>:/O2 /GL /arch:AVX2>
+    )
+    # /LTCG — link-time code generation, required companion to /GL
+    target_link_options(bluecadet_hap PRIVATE
+        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:RelWithDebInfo>:/LTCG>
+    )
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Platform-specific settings

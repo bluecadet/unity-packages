@@ -35,6 +35,20 @@ HAP_EXPORT int        hap_get_texture_format(HapHandle *h);
 HAP_EXPORT int        hap_get_frame_buffer_size(HapHandle *h);
 HAP_EXPORT int        hap_decode_frame(HapHandle *h, int frame_index,
                                         uint8_t *buf, int size);
+
+/* Split version of hap_decode_frame for profiling.
+ * hap_read_sample  — copies the compressed frame into the internal buffer.
+ *                    Returns the number of bytes read (> 0) on success,
+ *                    or <= 0 on error or empty sample.
+ *                    (This is where page-fault / I/O time appears.)
+ * hap_decompress_frame — Snappy-decompresses the data read by the last
+ *                    hap_read_sample call into buf.
+ *                    Returns HAP_ERROR_* (same as hap_decode_frame).
+ * These two calls must always be paired on the same thread and handle.
+ * Not thread-safe: both read/write unsynchronized state inside HapHandle. */
+HAP_EXPORT int        hap_read_sample(HapHandle *h, int frame_index);
+HAP_EXPORT int        hap_decompress_frame(HapHandle *h, uint8_t *buf, int size);
+
 HAP_EXPORT void       hap_set_thread_count(HapHandle *h, int count);
 
 #ifdef __cplusplus

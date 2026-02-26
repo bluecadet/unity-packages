@@ -150,10 +150,11 @@ namespace Bluecadet.Hap
         // Profiler markers (visible in Unity Profiler)
         // ─────────────────────────────────────────────────────────────────────
 
-        static readonly ProfilerMarker s_UpdateMarker = new ProfilerMarker("HapPlayer.Update");
-        static readonly ProfilerMarker s_UploadMarker = new ProfilerMarker("HapPlayer.UploadFrame");
-        static readonly ProfilerMarker s_RenderMarker = new ProfilerMarker("HapPlayer.Render");
-        static readonly ProfilerMarker s_DecodeMarker = new ProfilerMarker("HapPlayer.DecodeFrame");
+        static readonly ProfilerMarker s_UpdateMarker     = new ProfilerMarker("HapPlayer.Update");
+        static readonly ProfilerMarker s_UploadMarker     = new ProfilerMarker("HapPlayer.UploadFrame");
+        static readonly ProfilerMarker s_RenderMarker     = new ProfilerMarker("HapPlayer.Render");
+        static readonly ProfilerMarker s_ReadSampleMarker = new ProfilerMarker("HapPlayer.ReadSample"); // I/O / page-fault time
+        static readonly ProfilerMarker s_DecompressMarker = new ProfilerMarker("HapPlayer.Decompress");  // Snappy CPU time
 
         // ─────────────────────────────────────────────────────────────────────
         // Events
@@ -657,11 +658,25 @@ namespace Bluecadet.Hap
                     if (ringBuffer == null) break;
 
                     // Decode into the ring buffer's write slot.
+                    // Split into two timed steps so the profiler shows I/O vs CPU separately:
+                    //   ReadSample  — memcpy from memory-mapped file (page-fault / disk latency)
+                    //   Decompress  — Snappy decompression via thread pool (pure CPU)
                     IntPtr buf = ringBuffer.WritePtr;
+                    // readBytes > 0 means the native side stored the sample; native side
+                    // tracks the byte count internally so we don't pass it to Decompress.
+                    int readBytes;
+                    using (s_ReadSampleMarker.Auto())
+                        readBytes = HapNative.hap_read_sample(handle, target);
+
                     int result;
-                    using (s_DecodeMarker.Auto())
+                    if (readBytes <= 0)
                     {
-                        result = HapNative.hap_decode_frame(handle, target, buf, frameBufferSize);
+                        result = HapNative.ErrorFile;
+                    }
+                    else
+                    {
+                        using (s_DecompressMarker.Auto())
+                            result = HapNative.hap_decompress_frame(handle, buf, frameBufferSize);
                     }
 
                     if (result != HapNative.ErrorNone)

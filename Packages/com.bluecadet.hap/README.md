@@ -89,21 +89,29 @@ Native C plugin handles demux + decode. C# handles playback logic, texture uploa
 
 Requires CMake 3.15+.
 
+**macOS**
 ```bash
 cd Native~
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-To build a universal binary for both Apple Silicon and Intel on macOS:
-
+To build a universal binary for both Apple Silicon and Intel:
 ```bash
 cd Native~
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 cmake --build build
 ```
-
 Verify with `lipo -info Plugins/bluecadet_hap.bundle`.
+
+**Windows (MSVC)**
+
+MSVC is a multi-configuration generator so the build type must be specified at build time, not configure time:
+```bash
+cd Native~
+cmake -B build
+cmake --build build --config Release
+```
 
 The post-build step copies the output to `Plugins/`:
 
@@ -112,8 +120,6 @@ The post-build step copies the output to `Plugins/`:
 | macOS | `Plugins/bluecadet_hap.bundle` |
 | Windows | `Plugins/bluecadet_hap.dll` |
 | Linux | `Plugins/libbluecadet_hap.so` |
-
-Only macOS (arm64) has been tested so far.
 
 ## Vendor Libraries
 
