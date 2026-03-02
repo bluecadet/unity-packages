@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace Bluecadet.Spring
@@ -73,8 +74,8 @@ namespace Bluecadet.Spring
         public float Add(float a, float b) => a + b;
         public float Subtract(float a, float b) => a - b;
         public float Scale(float value, float scalar) => value * scalar;
-        public float Magnitude(float value) => Mathf.Abs(value);
-        public float Distance(float a, float b) => Mathf.Abs(a - b);
+        public float Magnitude(float value) => math.abs(value);
+        public float Distance(float a, float b) => math.abs(a - b);
         public float Zero => 0f;
     }
 
@@ -83,8 +84,8 @@ namespace Bluecadet.Spring
         public Vector2 Add(Vector2 a, Vector2 b) => a + b;
         public Vector2 Subtract(Vector2 a, Vector2 b) => a - b;
         public Vector2 Scale(Vector2 value, float scalar) => value * scalar;
-        public float Magnitude(Vector2 value) => value.magnitude;
-        public float Distance(Vector2 a, Vector2 b) => (a - b).magnitude;
+        public float Magnitude(Vector2 value) => math.length(new float2(value.x, value.y));
+        public float Distance(Vector2 a, Vector2 b) => math.length(new float2(a.x - b.x, a.y - b.y));
         public Vector2 Zero => Vector2.zero;
     }
 
@@ -93,8 +94,8 @@ namespace Bluecadet.Spring
         public Vector3 Add(Vector3 a, Vector3 b) => a + b;
         public Vector3 Subtract(Vector3 a, Vector3 b) => a - b;
         public Vector3 Scale(Vector3 value, float scalar) => value * scalar;
-        public float Magnitude(Vector3 value) => value.magnitude;
-        public float Distance(Vector3 a, Vector3 b) => (a - b).magnitude;
+        public float Magnitude(Vector3 value) => math.length(new float3(value.x, value.y, value.z));
+        public float Distance(Vector3 a, Vector3 b) => math.length(new float3(a.x - b.x, a.y - b.y, a.z - b.z));
         public Vector3 Zero => Vector3.zero;
     }
 

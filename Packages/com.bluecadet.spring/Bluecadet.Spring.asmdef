@@ -1,7 +1,10 @@
 {
     "name": "Bluecadet.Spring",
     "rootNamespace": "Bluecadet.Spring",
-    "references": [],
+    "references": [
+        "Unity.Burst",
+        "Unity.Mathematics"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

@@ -4,28 +4,22 @@ namespace Bluecadet.Spring
 {
     /// <summary>
     /// Common interface for all animated values (springs, decays).
-    /// Enables unified management and DOTween-style target association.
     /// </summary>
     public interface IMotion
     {
         bool IsFinished { get; }
-        void Advance(double deltaTime);
+        void Advance(float deltaTime);
         void Stop();
 
         /// <summary>
-        /// Associated target object (for DOTween-style queries).
+        /// Stop and return this instance to its pool. Called internally by <see cref="Spring.KillAll"/>.
         /// </summary>
-        object Target { get; }
-
-        /// <summary>
-        /// Optional identifier for multiple motions on same target.
-        /// </summary>
-        string Id { get; }
+        internal void Release();
 
         /// <summary>
         /// Fired when motion completes naturally or is stopped.
         /// </summary>
-        event Action<IMotion> OnComplete;
+        event Action OnComplete;
     }
 
     /// <summary>
