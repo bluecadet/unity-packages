@@ -1,7 +1,7 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Events;
 
 namespace Bluecadet.Utils {
 
@@ -16,7 +16,7 @@ namespace Bluecadet.Utils {
         public List<float> IdleTimeoutIntervals = new List<float>();
         
         [Tooltip("Event triggered when idle state is reached. Returns the corresponding \"tier\" number based on Idle Timeout Intervals list.")]
-        public UnityEvent<int> IdleStateEvent;
+        public event Action<int> OnIdleState;
 
         // 0 - Not idle state
         // 1+ - Idle state in tiers; Max state equals the size of IdleTimeoutIntervals
@@ -30,7 +30,7 @@ namespace Bluecadet.Utils {
             for (int i = 0; i < IdleTimeoutIntervals.Count; i++) {
                 if (idleTime >= IdleTimeoutIntervals[i] && currentState <= i) {
                     currentState = i + 1;
-                    IdleStateEvent.Invoke(currentState);
+                    OnIdleState?.Invoke(currentState);
                 }
             }
         }
