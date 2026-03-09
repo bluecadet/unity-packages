@@ -20,14 +20,14 @@ namespace Bluecadet.Utils
 			}
 
 			// Fast path: instance already cached
-			if (_instance != null)
+			if (_instance != null && _instance)
 				return _instance;
 
 			// Slow path: need to find or create
 			lock (Lock)
 			{
 				// Double-check after acquiring lock
-				if (_instance != null)
+				if (_instance != null && _instance)
 					return _instance;
 
 				var instances = Object.FindObjectsByType<T>(FindObjectsSortMode.None);
@@ -75,6 +75,11 @@ namespace Bluecadet.Utils
 		private void OnApplicationQuit()
 		{
 			Quitting = true;
+		}
+
+		[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+		private static void ResetStaticState() {
+				Quitting = false;
 		}
 	}
 }
