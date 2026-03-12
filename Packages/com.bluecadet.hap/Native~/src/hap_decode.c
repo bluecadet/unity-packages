@@ -53,6 +53,8 @@ static DWORD WINAPI thread_worker_win(LPVOID arg)
     return 0;
 }
 
+static void pool_destroy(ThreadPool *pool); /* forward declaration */
+
 static ThreadPool *pool_create(int count)
 {
     ThreadPool *pool = (ThreadPool *)calloc(1, sizeof(ThreadPool));
