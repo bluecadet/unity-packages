@@ -19,7 +19,17 @@ public class SettingsManagerEditor : Editor
     private SettingsWrapper _wrapper;
     private SerializedObject _wrapperSO;
     private HashSet<string> _localOverridePaths = new();
-    private HashSet<string> _dirtyPaths = new();
+    private bool _stateInitialized = false;
+
+    // Dirty paths live on the manager so they survive inspector selection changes.
+    private HashSet<string> DirtyPaths => GetManagerDirtyPaths();
+
+    private HashSet<string> GetManagerDirtyPaths()
+    {
+        var field = target.GetType().GetField("editorDirtyPaths",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        return field?.GetValue(target) as HashSet<string> ?? new HashSet<string>();
+    }
 
     private Type _settingsType;
 
@@ -43,6 +53,9 @@ public class SettingsManagerEditor : Editor
 
         _wrapper = ScriptableObject.CreateInstance<SettingsWrapper>();
         _wrapper.hideFlags = HideFlags.DontSave;
+
+        if (!Application.isPlaying)
+            InvokeMethod("LoadFromFile");
     }
 
     void OnDisable()
@@ -68,14 +81,7 @@ public class SettingsManagerEditor : Editor
 
     public override void OnInspectorGUI()
     {
-        // Draw the file name fields via the real serialized object
-        serializedObject.Update();
-        EditorGUILayout.PropertyField(serializedObject.FindProperty("baseFileName"));
-        EditorGUILayout.PropertyField(serializedObject.FindProperty("localFileName"));
-        serializedObject.ApplyModifiedProperties();
-
-        // Collect local override paths
-        CollectLocalOverridePaths(serializedObject.FindProperty("localFileName").stringValue);
+        RefreshFileState();
 
         // Draw currentSettings via the wrapper
         var currentSettings = (AppSettings)GetCurrentSettings();
@@ -99,7 +105,7 @@ public class SettingsManagerEditor : Editor
         }
 
         // Legend
-        if (_localOverridePaths.Count > 0 || _dirtyPaths.Count > 0)
+        if (_localOverridePaths.Count > 0 || DirtyPaths.Count > 0)
         {
             EditorGUILayout.Space(2);
             var prev = GUI.backgroundColor;
@@ -108,7 +114,7 @@ public class SettingsManagerEditor : Editor
                 GUI.backgroundColor = OverrideTint;
                 EditorGUILayout.HelpBox("Highlighted blue = local override", MessageType.None);
             }
-            if (_dirtyPaths.Count > 0)
+            if (DirtyPaths.Count > 0)
             {
                 GUI.backgroundColor = DirtyTint;
                 EditorGUILayout.HelpBox("Highlighted yellow = unsaved change", MessageType.None);
@@ -120,20 +126,23 @@ public class SettingsManagerEditor : Editor
 
         if (GUILayout.Button("Save to Base File"))
         {
-            InvokeMethod("SaveToBaseFile", new HashSet<string>(_dirtyPaths));
-            _dirtyPaths.Clear();
+            InvokeMethod("SaveToBaseFile", new HashSet<string>(DirtyPaths));
+            DirtyPaths.Clear();
+            _stateInitialized = false;
         }
 
         if (GUILayout.Button("Save to Local File"))
         {
-            InvokeMethod("SaveToLocalFile");
-            _dirtyPaths.Clear();
+            InvokeMethod("SaveToLocalFile", new HashSet<string>(DirtyPaths));
+            DirtyPaths.Clear();
+            _stateInitialized = false;
         }
 
         if (GUILayout.Button("Load from File(s)"))
         {
             InvokeMethod("LoadFromFile");
-            _dirtyPaths.Clear();
+            DirtyPaths.Clear();
+            _stateInitialized = false;
         }
 
         EditorGUI.BeginDisabledGroup(!Application.isPlaying);
@@ -153,23 +162,58 @@ public class SettingsManagerEditor : Editor
         method?.Invoke(target, args.Length > 0 ? args : null);
     }
 
-    private void CollectLocalOverridePaths(string localFileName)
+    /// Reads both JSON files to refresh override paths and, on first call after a
+    /// load/save/reset, computes which default fields are not yet persisted anywhere
+    /// and marks them dirty.
+    private void RefreshFileState()
     {
+        var mgr = (SettingsManagerBase)target;
+        var basePath = mgr.GetBaseFilePath();
+        var localPath = mgr.GetLocalFilePath();
+
         _localOverridePaths.Clear();
-        if (string.IsNullOrEmpty(localFileName)) return;
 
-        string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
-        if (!File.Exists(localPath)) return;
+        JObject mergedObj = new JObject();
 
-        try
+        if (!string.IsNullOrEmpty(basePath) && File.Exists(basePath))
         {
-            string json = File.ReadAllText(localPath);
-            JObject obj = JObject.Parse(json);
-            FlattenPaths(obj, "", _localOverridePaths);
+            try
+            {
+                mergedObj = JObject.Parse(File.ReadAllText(basePath));
+            }
+            catch { }
         }
-        catch
+
+        if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
         {
-            // Ignore parse errors
+            try
+            {
+                JObject localObj = JObject.Parse(File.ReadAllText(localPath));
+                FlattenPaths(localObj, "", _localOverridePaths);
+                mergedObj.Merge(localObj, new JsonMergeSettings { MergeArrayHandling = MergeArrayHandling.Replace });
+            }
+            catch { }
+        }
+
+        if (!_stateInitialized)
+        {
+            _stateInitialized = true;
+
+            // Any default leaf path not present in either file is dirty — it hasn't been saved yet.
+            var defaultInstance = (AppSettings)Activator.CreateInstance(_settingsType);
+            JObject defaultObj = JObject.Parse(JsonUtility.ToJson(defaultInstance));
+
+            var allDefaultPaths = new HashSet<string>();
+            FlattenPaths(defaultObj, "", allDefaultPaths);
+
+            var persistedPaths = new HashSet<string>();
+            FlattenPaths(mergedObj, "", persistedPaths);
+
+            foreach (var path in allDefaultPaths)
+            {
+                if (!persistedPaths.Contains(path))
+                    DirtyPaths.Add(path);
+            }
         }
     }
 
@@ -199,7 +243,7 @@ public class SettingsManagerEditor : Editor
         {
             string jsonPath = PropertyPathToJsonPath(iter.propertyPath);
             bool isOverridden = _localOverridePaths.Contains(jsonPath);
-            bool isDirty = _dirtyPaths.Contains(jsonPath);
+            bool isDirty = DirtyPaths.Contains(jsonPath);
             bool hasChildren = iter.hasVisibleChildren;
 
             Color prevBg = GUI.backgroundColor;
@@ -216,7 +260,7 @@ public class SettingsManagerEditor : Editor
             {
                 Color? foldoutTint = null;
                 string childPrefix = jsonPath + ".";
-                foreach (var p in _dirtyPaths)
+                foreach (var p in DirtyPaths)
                 {
                     if (p.StartsWith(childPrefix) || p == jsonPath)
                     {
@@ -257,7 +301,7 @@ public class SettingsManagerEditor : Editor
                 EditorGUILayout.PropertyField(iter, false);
                 if (EditorGUI.EndChangeCheck())
                 {
-                    _dirtyPaths.Add(jsonPath);
+                    DirtyPaths.Add(jsonPath);
                 }
                 GUI.backgroundColor = prevBg;
                 iter.NextVisible(false);

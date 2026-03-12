@@ -27,12 +27,20 @@ namespace Bluecadet.Utils {
     /// Non-generic base class for SettingsManager<TSettings>.
     /// Exists so the custom editor can target all generic variants.
     [ExecuteInEditMode]
-    public abstract class SettingsManagerBase : MonoBehaviour { }
+    public abstract class SettingsManagerBase : MonoBehaviour {
+        public virtual string GetBaseFilePath() {
+            return Path.Combine(Application.streamingAssetsPath, "settings.json");
+        }
+
+        public virtual string GetLocalFilePath() {
+            return Path.Combine(Application.streamingAssetsPath, "settings.local.json");
+        }
+    }
 
     [ExecuteInEditMode]
     public abstract class SettingsManager<TSettings> : SettingsManagerBase
         where TSettings : AppSettings, new() {
-        
+
         public static SettingsManager<TSettings> Get() => SingletonRegistry<SettingsManager<TSettings>>.Get();
         public static SettingsManager<TSettings> Instance => SingletonRegistry<SettingsManager<TSettings>>.Get();
 
@@ -44,12 +52,6 @@ namespace Bluecadet.Utils {
             }
         }
 
-        [SerializeField]
-        private string baseFileName = "settings.json";
-
-        [SerializeField]
-        private string localFileName = "settings.local.json";
-
         // NonSerialized so settings aren't baked into the scene/prefab.
         // Always populated at runtime via LoadFromFile().
         // Drawn in the inspector via SettingsManagerEditor using a temporary ScriptableObject wrapper.
@@ -58,6 +60,11 @@ namespace Bluecadet.Utils {
 
 
 #if UNITY_EDITOR
+        /// Tracks which leaf paths have unsaved inspector changes.
+        /// Stored on the manager (not the Editor class) so state survives inspector selection changes.
+        [NonSerialized]
+        public HashSet<string> editorDirtyPaths = new();
+
         /// Converts settings to JSON using JsonUtility (which handles Unity types correctly).
         private static string ToJson(TSettings settings) {
             return JsonUtility.ToJson(settings, true);
@@ -98,11 +105,11 @@ namespace Bluecadet.Utils {
         /// Loads settings from the base file, then merges any local overrides on top.
         public void LoadFromFile() {
             try {
-                string basePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+                string basePath = GetBaseFilePath();
                 string baseJson = File.ReadAllText(basePath);
                 JObject baseObj = JObject.Parse(baseJson);
 
-                string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+                string localPath = GetLocalFilePath();
                 if (File.Exists(localPath)) {
                     string localJson = File.ReadAllText(localPath);
                     JObject localObj = JObject.Parse(localJson);
@@ -112,8 +119,7 @@ namespace Bluecadet.Utils {
                 }
 
                 currentSettings = JsonUtility.FromJson<TSettings>(baseObj.ToString());
-            }
-            catch (Exception ex) {
+            } catch (Exception ex) {
                 Debug.LogException(ex);
                 Debug.LogWarning("Unable to load settings. Using defaults.");
 
@@ -121,8 +127,7 @@ namespace Bluecadet.Utils {
 #if UNITY_EDITOR
                 SaveDefaultsToBaseFile();
 #endif
-            }
-            finally {
+            } finally {
                 ApplyGeneralSettings();
                 BroadcastSettingsLoaded();
             }
@@ -131,7 +136,7 @@ namespace Bluecadet.Utils {
 #if UNITY_EDITOR
         /// Writes default settings to the base file. Used when no file exists yet.
         private void SaveDefaultsToBaseFile() {
-            string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            string filePath = GetBaseFilePath();
             Directory.CreateDirectory(Path.GetDirectoryName(filePath));
             File.WriteAllText(filePath, ToJson(new TSettings()));
         }
@@ -140,7 +145,7 @@ namespace Bluecadet.Utils {
         /// If a dirty field overlaps with a local override, it is removed from the local file.
         /// If no fields are dirty and no base file exists, saves defaults.
         public void SaveToBaseFile(IEnumerable<string> dirtyPaths) {
-            string filePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
+            string filePath = GetBaseFilePath();
             bool hasDirty = false;
             foreach (var _ in dirtyPaths) { hasDirty = true; break; }
 
@@ -188,56 +193,60 @@ namespace Bluecadet.Utils {
             }
         }
 
-        /// Diffs current settings against the base file and writes only the differences
-        /// to the local file. Deletes the local file if there are no differences.
-        public void SaveToLocalFile() {
-            string basePath = Path.Combine(Application.streamingAssetsPath, baseFileName);
-            JObject baseObj;
-            if (File.Exists(basePath)) {
-                baseObj = JObject.Parse(File.ReadAllText(basePath));
-            } else {
-                baseObj = ToJObject(new TSettings());
-            }
+        /// Writes only the given dirty fields to the local overrides file.
+        /// A dirty field is written only if it differs from the base file value;
+        /// if it matches base, it is removed from local (no override needed).
+        /// Deletes the local file if no overrides remain.
+        public void SaveToLocalFile(IEnumerable<string> dirtyPaths) {
+            string basePath = GetBaseFilePath();
+            JObject baseObj = File.Exists(basePath)
+                ? JObject.Parse(File.ReadAllText(basePath))
+                : ToJObject(new TSettings());
 
             JObject currentObj = ToJObject(currentSettings);
-            JObject diff = ComputeDiff(baseObj, currentObj);
 
-            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
-            if (diff.Count == 0) {
-                if (File.Exists(localPath)) {
-                    File.Delete(localPath);
+            string localPath = GetLocalFilePath();
+            JObject localObj = File.Exists(localPath)
+                ? JObject.Parse(File.ReadAllText(localPath))
+                : new JObject();
+
+            foreach (string path in dirtyPaths) {
+                string[] parts = path.Split('.');
+                JToken baseVal = GetNestedValue(baseObj, parts);
+                JToken currentVal = GetNestedValue(currentObj, parts);
+
+                if (currentVal != null && !JToken.DeepEquals(baseVal, currentVal)) {
+                    SetNestedValue(localObj, currentObj, parts, 0);
+                } else {
+                    RemoveNestedPath(localObj, parts, 0);
                 }
-                if (File.Exists(localPath + ".meta")) {
-                    File.Delete(localPath + ".meta");
-                }
+            }
+
+            PruneEmpty(localObj);
+
+            if (localObj.Count == 0) {
+                DeleteLocalFile();
             } else {
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath));
-                File.WriteAllText(localPath, diff.ToString(Newtonsoft.Json.Formatting.Indented));
+                File.WriteAllText(localPath, localObj.ToString(Newtonsoft.Json.Formatting.Indented));
             }
         }
 
-        /// Recursively compares two JObjects and returns only the properties that differ.
-        private static JObject ComputeDiff(JObject baseObj, JObject currentObj) {
-            var diff = new JObject();
-            foreach (var property in currentObj.Properties()) {
-                JToken baseVal = baseObj[property.Name];
-                if (baseVal == null) {
-                    diff[property.Name] = property.Value;
-                } else if (property.Value.Type == JTokenType.Object && baseVal.Type == JTokenType.Object) {
-                    JObject childDiff = ComputeDiff((JObject)baseVal, (JObject)property.Value);
-                    if (childDiff.Count > 0) {
-                        diff[property.Name] = childDiff;
-                    }
-                } else if (!JToken.DeepEquals(baseVal, property.Value)) {
-                    diff[property.Name] = property.Value;
-                }
+        /// Returns the value at the given key path within a JObject, or null if not found.
+        private static JToken GetNestedValue(JObject obj, string[] parts) {
+            JToken current = obj;
+            foreach (var part in parts) {
+                if (current is JObject jObj && jObj.TryGetValue(part, out JToken next))
+                    current = next;
+                else
+                    return null;
             }
-            return diff;
+            return current;
         }
 
         /// Deletes the local overrides file entirely.
         private void DeleteLocalFile() {
-            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+            string localPath = GetLocalFilePath();
             if (File.Exists(localPath))
                 File.Delete(localPath);
             if (File.Exists(localPath + ".meta"))
@@ -247,7 +256,7 @@ namespace Bluecadet.Utils {
         /// Removes the given dot-separated paths from the local overrides file.
         /// Deletes the file if no overrides remain.
         private void RemovePathsFromLocalFile(IEnumerable<string> paths) {
-            string localPath = Path.Combine(Application.streamingAssetsPath, localFileName);
+            string localPath = GetLocalFilePath();
             if (!File.Exists(localPath)) return;
 
             JObject localObj;
@@ -267,7 +276,7 @@ namespace Bluecadet.Utils {
             if (localObj.Count == 0) {
                 DeleteLocalFile();
             } else {
-                File.WriteAllText(localPath, localObj.ToString(Newtonsoft.Json.Formatting.Indented));
+                File.WriteAllText(GetLocalFilePath(), localObj.ToString(Newtonsoft.Json.Formatting.Indented));
             }
         }
 
