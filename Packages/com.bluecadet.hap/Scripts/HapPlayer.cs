@@ -113,6 +113,14 @@ namespace Bluecadet.Hap
         /// <summary>Set to false to signal the decode thread to exit.</summary>
         volatile bool _decodeRunning;
 
+        /// <summary>
+        /// Set to false just before hap_close() is called so the decode thread
+        /// can detect a closing handle and abort rather than crash into freed memory.
+        /// Written by the main thread after _decodeExited signals; read by the
+        /// decode thread as a belt-and-suspenders guard.
+        /// </summary>
+        volatile bool _handleValid;
+
         /// <summary>The frame index the main thread wants decoded next. The decode thread watches this.</summary>
         volatile int _decodeTargetFrame = -1;
 
@@ -428,6 +436,10 @@ namespace Bluecadet.Hap
         void Open()
         {
             if (string.IsNullOrEmpty(filePath)) return;
+            // Guard against double-open (e.g. OnEnable called unexpectedly while already playing).
+            // Without this, a second call would overwrite _handle and start a second decode thread
+            // while the first one keeps running, leaking both the old handle and thread.
+            if (IsOpen) return;
 
             string resolved = ResolvePath(filePath);
 
@@ -494,6 +506,7 @@ namespace Bluecadet.Hap
             _openedFrame = UnityEngine.Time.frameCount;
 
             // Start background decode thread
+            _handleValid = true;
             _decodeExited.Reset();
             _decodeRunning = true;
             _decodeThread = new Thread(DecodeLoop)
@@ -504,7 +517,24 @@ namespace Bluecadet.Hap
                 // measurably worse on Windows than macOS at default priority.
                 Priority = System.Threading.ThreadPriority.AboveNormal,
             };
-            _decodeThread.Start();
+            try
+            {
+                _decodeThread.Start();
+            }
+            catch (Exception ex)
+            {
+                // Thread creation failed (OS resource exhaustion or invalid state).
+                // Reset all decode state so Close() doesn't hang indefinitely waiting
+                // on _decodeExited, which the thread would never Set.
+                Debug.LogError($"[HapPlayer] Failed to start decode thread: {ex.Message}");
+                _decodeThread = null;
+                _decodeRunning = false;
+                _handleValid = false;
+                _decodeExited.Set();
+                HapNative.hap_close(_handle);
+                _handle = IntPtr.Zero;
+                return;
+            }
 
             // Request the first frame
             if (_frameCount > 0)
@@ -556,7 +586,10 @@ namespace Bluecadet.Hap
                 _outputMat = null;
             }
 
-            // Close native handle
+            // Close native handle.  Mark invalid before the call so the decode
+            // thread (if it somehow missed _decodeRunning = false) can detect
+            // the handle is gone and abort rather than crash into freed memory.
+            _handleValid = false;
             if (_handle != IntPtr.Zero)
             {
                 HapNative.hap_close(_handle);
@@ -636,6 +669,7 @@ namespace Bluecadet.Hap
                 int lastDecoded  = -1;   // most recent frame written to the ring buffer; -1 = nothing yet.
                                          //   The pre-fetch guard (lastDecoded >= 0) depends on this sentinel.
                 bool prefetchDone = false;
+                int consecutiveErrors = 0;  // circuit-breaker: stop on repeated native failures
 
                 while (_decodeRunning)
                 {
@@ -699,11 +733,20 @@ namespace Bluecadet.Hap
                     if (target == -1) continue;
                     if (ringBuffer == null) break;
 
+                    // Belt-and-suspenders: if the handle was closed between our last
+                    // _decodeRunning check and here, abort rather than crash into freed
+                    // native memory.  The native null-checks in hap_read_sample provide
+                    // a second layer of defence, but this avoids the P/Invoke entirely.
+                    if (!_handleValid) break;
+
                     // Decode into the ring buffer's write slot.
                     // Split into two timed steps so the profiler shows I/O vs CPU separately:
                     //   ReadSample  — memcpy from memory-mapped file (page-fault / disk latency)
                     //   Decompress  — Snappy decompression via thread pool (pure CPU)
-                    IntPtr buf = ringBuffer.WritePtr;
+                    //
+                    // GetWritePtr() extracts the raw pointer from the NativeArray for P/Invoke.
+                    // The unsafe context is required for NativeArray.GetUnsafePtr().
+                    IntPtr buf = ringBuffer.GetWritePtr();
                     // readBytes > 0 means the native side stored the sample; native side
                     // tracks the byte count internally so we don't pass it to Decompress.
                     int readBytes;
@@ -723,10 +766,21 @@ namespace Bluecadet.Hap
 
                     if (result != HapNative.ErrorNone)
                     {
-                        Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}, error: {result}");
+                        consecutiveErrors++;
+                        Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}, error: {result} ({consecutiveErrors} consecutive)");
+                        // Circuit-breaker: stop the decode loop if the native plugin keeps
+                        // returning errors.  This prevents log-spam and runaway CPU usage
+                        // when the file is corrupt or the handle is in a bad state, while
+                        // still allowing transient errors (e.g. a single bad frame) to pass.
+                        if (consecutiveErrors >= 10)
+                        {
+                            Debug.LogError($"[HapPlayer] Decode loop aborting after {consecutiveErrors} consecutive errors on '{filePath}'");
+                            break;
+                        }
                     }
                     else
                     {
+                        consecutiveErrors = 0;
                         ringBuffer.CommitWrite(target);
                         lastDecoded = target;
 
@@ -772,14 +826,14 @@ namespace Bluecadet.Hap
             // command-list flush between RenderTexture.Create() and the first blit that targets it.
             if (UnityEngine.Time.frameCount == _openedFrame) return;
 
-            // Snapshot both frame index and pointer from the same _readIndex capture.
-            // Separate ReadFrame / ReadPtr calls would each re-read _readIndex, which the
-            // decode thread can change between them, producing a mismatched frame/pointer pair.
-            if (!ringBuffer.TryRead(out int readFrame, out IntPtr ptr)) return;
+            // Snapshot both frame index and data from the same _readIndex capture.
+            // Separate property reads would each re-read _readIndex, which the
+            // decode thread can change between them, producing a mismatched frame/data pair.
+            if (!ringBuffer.TryRead(out int readFrame, out var data)) return;
             if (readFrame == _lastUploadedFrame) return;
 
             // Upload the raw DXT/BC7 data to the texture
-            _uploader.Upload(ptr, _frameBufferSize);
+            _uploader.Upload(data);
 
             // Blit through the output shader (flip orientation and/or YCoCg decode)
             if (_outputRT != null && _outputMat != null)

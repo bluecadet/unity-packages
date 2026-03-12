@@ -1,6 +1,7 @@
 using System;
-using System.Runtime.InteropServices;
 using System.Threading;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 
 namespace Bluecadet.Hap
 {
@@ -9,22 +10,28 @@ namespace Bluecadet.Hap
     /// decode thread to the main thread.
     ///
     /// Design:
-    /// - 3 slots of native memory, each large enough to hold one decoded frame
-    /// - Writer (decode thread) writes to WritePtr, then calls CommitWrite
-    /// - Reader (main thread) reads from TryRead (atomic snapshot of both frame index and pointer)
+    /// - 3 slots backed by NativeArray&lt;byte&gt; (Allocator.Persistent), each large enough
+    ///   to hold one decoded frame
+    /// - Writer (decode thread) writes to WriteSlot, then calls CommitWrite
+    /// - Reader (main thread) reads from TryRead (atomic snapshot of both frame index and data)
     /// - No locks during steady-state operation — uses volatile + memory barriers
     ///
     /// The 3-slot design ensures the writer always has a slot to write to that isn't
     /// the one the reader is currently using. When the writer commits, it publishes
     /// a new read slot and advances the write head, skipping over the old read slot
     /// if necessary to avoid overwriting data the reader may still be using.
+    ///
+    /// Uses NativeArray&lt;byte&gt; instead of Marshal.AllocHGlobal for:
+    /// - Leak detection in the Unity editor (missing Dispose calls are reported)
+    /// - Double-free and use-after-dispose safety checks in editor
+    /// - Direct compatibility with Texture2D.LoadRawTextureData(NativeArray)
     /// </summary>
     internal sealed class HapFrameRingBuffer : IDisposable
     {
         const int SlotCount = 3;
 
         /// <summary>Native memory buffers for decoded frame data.</summary>
-        readonly IntPtr[] _slots;
+        readonly NativeArray<byte>[] _slots;
 
         /// <summary>Frame index stored in each slot (-1 if empty).</summary>
         readonly int[] _frameIndices;
@@ -42,8 +49,8 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// 0 = not disposed, 1 = disposed.
-        /// Int rather than bool so Interlocked.CompareExchange can guard the free loop
-        /// against concurrent calls from Dispose() and the GC finalizer.
+        /// Int rather than bool so Interlocked.CompareExchange can guard the dispose
+        /// against concurrent calls.
         /// </summary>
         int _disposed;
 
@@ -52,28 +59,30 @@ namespace Bluecadet.Hap
         public HapFrameRingBuffer(int slotSize)
         {
             _slotSize = slotSize;
-            _slots = new IntPtr[SlotCount];
+            _slots = new NativeArray<byte>[SlotCount];
             _frameIndices = new int[SlotCount];
 
             for (int i = 0; i < SlotCount; i++)
             {
-                _slots[i] = Marshal.AllocHGlobal(slotSize);
+                _slots[i] = new NativeArray<byte>(slotSize, Allocator.Persistent,
+                    NativeArrayOptions.UninitializedMemory);
                 _frameIndices[i] = -1;
             }
         }
 
         /// <summary>
-        /// Ensure native memory is freed even if Dispose() isn't called.
+        /// The current write slot as a NativeArray. The decode thread writes decoded frame data here.
         /// </summary>
-        ~HapFrameRingBuffer()
-        {
-            Dispose();
-        }
+        public NativeArray<byte> WriteSlot => _slots[_writeIndex];
 
         /// <summary>
-        /// Pointer to the current write slot. The decode thread writes decoded frame data here.
+        /// Get the raw pointer to the current write slot for P/Invoke interop.
+        /// Caller must be in an unsafe context.
         /// </summary>
-        public IntPtr WritePtr => _slots[_writeIndex];
+        public unsafe IntPtr GetWritePtr()
+        {
+            return (IntPtr)_slots[_writeIndex].GetUnsafePtr();
+        }
 
         /// <summary>
         /// Mark the current write slot as containing a decoded frame and make it available
@@ -105,32 +114,32 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Snapshot the current read slot atomically, returning both the frame index and data
-        /// pointer from the same _readIndex capture. Prefer this over separate ReadFrame /
-        /// ReadPtr calls to avoid a TOCTOU race where _readIndex could change between the two.
+        /// from the same _readIndex capture. Prefer this over separate property reads to avoid
+        /// a TOCTOU race where _readIndex could change between them.
         ///
         /// Returns false if no frame has been committed yet.
         /// Thread safety: Called only from the main thread.
         /// </summary>
-        public bool TryRead(out int frameIndex, out IntPtr ptr)
+        public bool TryRead(out int frameIndex, out NativeArray<byte> data)
         {
             int idx = _readIndex;
             if (idx < 0)
             {
                 frameIndex = -1;
-                ptr = IntPtr.Zero;
+                data = default;
                 return false;
             }
 
-            // Memory barrier ensures we read frameIndex and ptr after the slot index
+            // Memory barrier ensures we read frameIndex and data after the slot index
             Thread.MemoryBarrier();
             frameIndex = _frameIndices[idx];
-            ptr = _slots[idx];
+            data = _slots[idx];
             return true;
         }
 
         /// <summary>
         /// Free all native memory. Safe to call multiple times and from any thread —
-        /// Interlocked.CompareExchange ensures only the first caller runs the free loop.
+        /// Interlocked.CompareExchange ensures only the first caller runs the dispose loop.
         /// </summary>
         public void Dispose()
         {
@@ -139,14 +148,9 @@ namespace Bluecadet.Hap
 
             for (int i = 0; i < SlotCount; i++)
             {
-                if (_slots[i] != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(_slots[i]);
-                    _slots[i] = IntPtr.Zero;
-                }
+                if (_slots[i].IsCreated)
+                    _slots[i].Dispose();
             }
-
-            GC.SuppressFinalize(this);
         }
     }
 }

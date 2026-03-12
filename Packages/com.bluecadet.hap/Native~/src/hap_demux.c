@@ -368,7 +368,9 @@ HapDemux *hap_demux_open(const char *path)
                                                      &frame_bytes, &timestamp, &duration);
         d->frame_offsets[i] = ofs;
         d->frame_sizes[i]   = frame_bytes;
-        if ((int)frame_bytes > d->max_sample_size)
+        /* Guard against signed overflow: frame_bytes is unsigned, max_sample_size is int.
+         * Frames exceeding INT_MAX are rejected in hap_demux_read_sample anyway. */
+        if (frame_bytes <= (unsigned)INT_MAX && (int)frame_bytes > d->max_sample_size)
             d->max_sample_size = (int)frame_bytes;
     }
 
@@ -393,16 +395,28 @@ int   hap_demux_get_max_sample_size(HapDemux *d){ return d ? d->max_sample_size 
 
 int hap_demux_read_sample(HapDemux *d, int frame_index, uint8_t *buf, int buf_size)
 {
-    if (!d || frame_index < 0 || frame_index >= d->frame_count)
-        return -1;
+    /* Validate struct pointer and internal arrays before any field access.
+     * A missing NULL check on frame_offsets/frame_sizes has caused crashes
+     * when d points to a partially-initialised or freed struct. */
+    if (!d || !d->frame_offsets || !d->frame_sizes) return -1;
+    if (frame_index < 0 || frame_index >= d->frame_count) return -1;
 
     /* O(1) lookup from pre-cached table — no MP4D_frame_offset call needed */
     MP4D_file_offset_t ofs  = d->frame_offsets[frame_index];
     unsigned frame_bytes     = d->frame_sizes[frame_index];
 
     if (frame_bytes == 0 || ofs == 0) return -1;
+
+    /* Guard against signed overflow: frame_bytes is unsigned; casting a value
+     * > INT_MAX to int wraps negative, breaking both the buf_size check and
+     * the return value.  Reject oversized frames before the comparison. */
+    if (frame_bytes > (unsigned)INT_MAX) return -1;
+
     if (!buf) return (int)frame_bytes;
-    if (buf_size < (int)frame_bytes) return -1;
+
+    /* Use unsigned comparison so buf_size=0 is caught correctly. */
+    if ((unsigned)buf_size < frame_bytes) return -1;
+
     if ((uint64_t)ofs + frame_bytes > (uint64_t)d->mapped_size) return -1;
 
     /* Copy from mapped memory — no fseek, no fread, no syscall */

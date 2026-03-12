@@ -62,8 +62,20 @@ static ThreadPool *pool_create(int count)
     InitializeConditionVariable(&pool->work_cv);
     InitializeConditionVariable(&pool->done_cv);
     pool->threads = (HANDLE *)calloc((size_t)count, sizeof(HANDLE));
-    for (int i = 0; i < count; i++)
+    if (!pool->threads) {
+        DeleteCriticalSection(&pool->cs);
+        free(pool);
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
         pool->threads[i] = CreateThread(NULL, 0, thread_worker_win, pool, 0, NULL);
+        if (!pool->threads[i]) {
+            /* Shut down any threads already started before failing. */
+            pool->count = i;
+            pool_destroy(pool);
+            return NULL;
+        }
+    }
     return pool;
 }
 
@@ -142,6 +154,8 @@ static void *thread_worker(void *arg)
     return NULL;
 }
 
+static void pool_destroy(ThreadPool *pool);  /* forward declaration for error path in pool_create */
+
 static ThreadPool *pool_create(int count)
 {
     ThreadPool *pool = (ThreadPool *)calloc(1, sizeof(ThreadPool));
@@ -151,8 +165,21 @@ static ThreadPool *pool_create(int count)
     pthread_cond_init(&pool->work_cv, NULL);
     pthread_cond_init(&pool->done_cv, NULL);
     pool->threads = (pthread_t *)calloc((size_t)count, sizeof(pthread_t));
-    for (int i = 0; i < count; i++)
-        pthread_create(&pool->threads[i], NULL, thread_worker, pool);
+    if (!pool->threads) {
+        pthread_mutex_destroy(&pool->mutex);
+        pthread_cond_destroy(&pool->work_cv);
+        pthread_cond_destroy(&pool->done_cv);
+        free(pool);
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
+        if (pthread_create(&pool->threads[i], NULL, thread_worker, pool) != 0) {
+            /* Shut down any threads already started before failing. */
+            pool->count = i;
+            pool_destroy(pool);
+            return NULL;
+        }
+    }
     return pool;
 }
 

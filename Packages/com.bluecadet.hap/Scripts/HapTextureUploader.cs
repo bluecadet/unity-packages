@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using Unity.Collections;
 using UnityEngine;
 using Unity.Profiling;
 
@@ -65,20 +66,19 @@ namespace Bluecadet.Hap
         /// <summary>
         /// Upload raw compressed texture data to the GPU.
         ///
-        /// This is called each frame from the main thread. The data pointer comes from
+        /// This is called each frame from the main thread. The data comes from
         /// the ring buffer and contains DXT/BC7 compressed pixel data that the GPU
         /// can use directly.
         /// </summary>
-        /// <param name="data">Pointer to raw compressed texture data</param>
-        /// <param name="size">Size of the data in bytes</param>
-        public void Upload(IntPtr data, int size)
+        /// <param name="data">NativeArray containing raw compressed texture data</param>
+        public void Upload(NativeArray<byte> data)
         {
-            if (_texture == null || data == IntPtr.Zero) return;
+            if (_texture == null || !data.IsCreated) return;
 
             // Load the raw compressed data into the texture's CPU buffer
             using (s_LoadDataMarker.Auto())
             {
-                _texture.LoadRawTextureData(data, size);
+                _texture.LoadRawTextureData(data);
             }
 
             // Upload to GPU. Parameters: updateMipmaps=false, makeNoLongerReadable=false
