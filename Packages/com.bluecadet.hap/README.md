@@ -106,19 +106,29 @@ Verify with `lipo -info Plugins/bluecadet_hap.bundle`.
 
 **Windows (MSVC)**
 
-MSVC is a multi-configuration generator so the build type must be specified at build time, not configure time:
+MSVC is a multi-configuration generator so the build type must be specified at build time, not configure time.
+
+x64:
 ```bash
 cd Native~
-cmake -B build
-cmake --build build --config Release
+cmake -B build-x64 -A x64
+cmake --build build-x64 --config Release
 ```
 
-The post-build step copies the output to `Plugins/`:
+ARM64:
+```bash
+cd Native~
+cmake -B build-arm64 -A ARM64
+cmake --build build-arm64 --config Release
+```
+
+The post-build step copies each output to its architecture subdirectory under `Plugins/`:
 
 | Platform | Output |
 |----------|--------|
 | macOS | `Plugins/bluecadet_hap.bundle` |
-| Windows | `Plugins/bluecadet_hap.dll` |
+| Windows x64 | `Plugins/x86_64/bluecadet_hap.dll` |
+| Windows ARM64 | `Plugins/ARM64/bluecadet_hap.dll` |
 | Linux | `Plugins/libbluecadet_hap.so` |
 
 ## Vendor Libraries

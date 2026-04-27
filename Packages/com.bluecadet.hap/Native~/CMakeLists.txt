@@ -16,10 +16,18 @@ set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
 
+# Detect target architecture. For MSVC, CMAKE_GENERATOR_PLATFORM is authoritative
+# (CMAKE_SYSTEM_PROCESSOR reflects the host when cross-compiling to ARM64).
+if(CMAKE_GENERATOR_PLATFORM MATCHES "ARM64|ARM" OR CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    set(TARGET_IS_X86_64 FALSE)
+else()
+    set(TARGET_IS_X86_64 TRUE)
+endif()
+
 # Enable AVX2 SIMD in Snappy's decompressor on x86_64 only (speeds up bulk
 # memcpy operations inside Snappy's copy instructions). Requires a
-# Haswell-or-later CPU (2013+). Not available on ARM64 (Apple Silicon).
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+# Haswell-or-later CPU (2013+). Not available on ARM64.
+if(TARGET_IS_X86_64)
     set(SNAPPY_REQUIRE_AVX2 ON CACHE BOOL "" FORCE)
 else()
     set(SNAPPY_REQUIRE_AVX2 OFF CACHE BOOL "" FORCE)
@@ -55,15 +63,22 @@ target_link_libraries(bluecadet_hap PRIVATE snappy)
 # ─────────────────────────────────────────────────────────────────────────────
 
 if(MSVC)
-    # /O2       — maximum speed (inlining, loop unrolling, auto-vectorisation)
-    # /GL       — whole-program optimisation (inlines across translation units)
-    # /arch:AVX2 — emit AVX2 instructions; enables auto-vectorisation of our
-    #              decode loops and matches the Snappy AVX2 SIMD paths above.
-    #              Requires Haswell or later (Intel 2013+, AMD 2015+).
-    target_compile_options(bluecadet_hap PRIVATE
-        $<$<CONFIG:Release>:/O2 /GL /arch:AVX2>
-        $<$<CONFIG:RelWithDebInfo>:/O2 /GL /arch:AVX2>
-    )
+    if(TARGET_IS_X86_64)
+        # /O2       — maximum speed (inlining, loop unrolling, auto-vectorisation)
+        # /GL       — whole-program optimisation (inlines across translation units)
+        # /arch:AVX2 — emit AVX2 instructions; enables auto-vectorisation of our
+        #              decode loops and matches the Snappy AVX2 SIMD paths above.
+        #              Requires Haswell or later (Intel 2013+, AMD 2015+).
+        target_compile_options(bluecadet_hap PRIVATE
+            $<$<CONFIG:Release>:/O2 /GL /arch:AVX2>
+            $<$<CONFIG:RelWithDebInfo>:/O2 /GL /arch:AVX2>
+        )
+    else()
+        target_compile_options(bluecadet_hap PRIVATE
+            $<$<CONFIG:Release>:/O2 /GL>
+            $<$<CONFIG:RelWithDebInfo>:/O2 /GL>
+        )
+    endif()
     # /LTCG — link-time code generation, required companion to /GL
     target_link_options(bluecadet_hap PRIVATE
         $<$<CONFIG:Release>:/LTCG>
@@ -99,7 +114,15 @@ endif()
 # Output to Plugins directory
 # ─────────────────────────────────────────────────────────────────────────────
 
-set(PLUGIN_DEST "${CMAKE_SOURCE_DIR}/../Plugins")
+if(WIN32)
+    if(TARGET_IS_X86_64)
+        set(PLUGIN_DEST "${CMAKE_SOURCE_DIR}/../Plugins/x86_64")
+    else()
+        set(PLUGIN_DEST "${CMAKE_SOURCE_DIR}/../Plugins/ARM64")
+    endif()
+else()
+    set(PLUGIN_DEST "${CMAKE_SOURCE_DIR}/../Plugins")
+endif()
 
 install(TARGETS bluecadet_hap DESTINATION "${PLUGIN_DEST}")
 
