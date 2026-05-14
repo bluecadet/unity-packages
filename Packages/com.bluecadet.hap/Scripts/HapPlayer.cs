@@ -151,11 +151,15 @@ namespace Bluecadet.Hap
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Final decoded and orientation-corrected output texture.
-        /// All formats blit through here to correct the 180° orientation flip and (for HAP Q)
-        /// perform the YCoCg→RGB color space conversion.
+        /// Double-buffered output RenderTextures. The decode blit writes to the back buffer
+        /// each frame while the scene renderer reads the front buffer (written last frame).
+        /// Swapping front/back after each blit ensures the GPU never reads a texture while
+        /// another GPU command (or a CPU upload) is writing to it — eliminating the D3D12
+        /// read/write hazard that causes screen tearing on Windows.
+        /// Index 0/1 alternate roles each frame; _frontRTIndex tracks which is "front".
         /// </summary>
-        RenderTexture _outputRT;
+        RenderTexture[] _outputRTs;
+        int _frontRTIndex;
 
         /// <summary>Material used for the output blit. Shader varies by format.</summary>
         Material _outputMat;
@@ -191,7 +195,7 @@ namespace Bluecadet.Hap
         /// The current video frame as a correctly-oriented RGBA RenderTexture.
         /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
-        public Texture Texture => _outputRT != null ? (Texture)_outputRT : (Texture)_uploader?.Texture;
+        public Texture Texture => _outputRTs != null ? (Texture)_outputRTs[_frontRTIndex] : (Texture)_uploader?.Texture;
 
         public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
         public bool IsOpen => _handle != IntPtr.Zero;
@@ -492,13 +496,18 @@ namespace Bluecadet.Hap
             else
             {
                 _outputMat = new Material(outputShader) { hideFlags = HideFlags.HideAndDontSave };
-                _outputRT = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
+                _outputRTs = new RenderTexture[2];
+                _frontRTIndex = 0;
+                for (int i = 0; i < 2; i++)
                 {
-                    filterMode = FilterMode.Bilinear,
-                    wrapMode = TextureWrapMode.Clamp,
-                    hideFlags = HideFlags.HideAndDontSave
-                };
-                _outputRT.Create();
+                    _outputRTs[i] = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
+                    {
+                        filterMode = FilterMode.Bilinear,
+                        wrapMode = TextureWrapMode.Clamp,
+                        hideFlags = HideFlags.HideAndDontSave
+                    };
+                    _outputRTs[i].Create();
+                }
             }
 
             _clock = 0f;
@@ -574,11 +583,17 @@ namespace Bluecadet.Hap
             _ringBuffer?.Dispose();
             _ringBuffer = null;
 
-            if (_outputRT != null)
+            if (_outputRTs != null)
             {
-                _outputRT.Release();
-                UnityEngine.Object.Destroy(_outputRT);
-                _outputRT = null;
+                foreach (var rt in _outputRTs)
+                {
+                    if (rt != null)
+                    {
+                        rt.Release();
+                        UnityEngine.Object.Destroy(rt);
+                    }
+                }
+                _outputRTs = null;
             }
             if (_outputMat != null)
             {
@@ -835,9 +850,16 @@ namespace Bluecadet.Hap
             // Upload the raw DXT/BC7 data to the texture
             _uploader.Upload(data);
 
-            // Blit through the output shader (flip orientation and/or YCoCg decode)
-            if (_outputRT != null && _outputMat != null)
-                Graphics.Blit(_uploader.Texture, _outputRT, _outputMat);
+            // Blit through the output shader (flip orientation and/or YCoCg decode) into the
+            // back buffer, then promote it to front. This ping-pong ensures the GPU never reads
+            // and writes the same RenderTexture simultaneously — the scene renderer reads the
+            // front buffer (written last frame) while we write to the back buffer (unused last frame).
+            if (_outputRTs != null && _outputMat != null)
+            {
+                int backRTIndex = 1 - _frontRTIndex;
+                Graphics.Blit(_uploader.Texture, _outputRTs[backRTIndex], _outputMat);
+                _frontRTIndex = backRTIndex;
+            }
 
             _lastUploadedFrame = readFrame;
         }
