@@ -1,4 +1,0 @@
-# Required for LFS to work properly
-# https://docs.unity3d.com/6000.0/Documentation/Manual/upm-git.html
-[lfs]
-  url = https://github.com/bluecadet/unity-packages.git
