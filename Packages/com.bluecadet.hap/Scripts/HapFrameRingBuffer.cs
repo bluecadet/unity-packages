@@ -10,16 +10,16 @@ namespace Bluecadet.Hap
     /// decode thread to the main thread.
     ///
     /// Design:
-    /// - 3 slots backed by NativeArray&lt;byte&gt; (Allocator.Persistent), each large enough
+    /// - 4 slots backed by NativeArray&lt;byte&gt; (Allocator.Persistent), each large enough
     ///   to hold one decoded frame
     /// - Writer (decode thread) writes to WriteSlot, then calls CommitWrite
     /// - Reader (main thread) reads from TryRead (atomic snapshot of both frame index and data)
     /// - No locks during steady-state operation — uses volatile + memory barriers
     ///
-    /// The 3-slot design ensures the writer always has a slot to write to that isn't
-    /// the one the reader is currently using. When the writer commits, it publishes
-    /// a new read slot and advances the write head, skipping over the old read slot
-    /// if necessary to avoid overwriting data the reader may still be using.
+    /// The 4-slot design ensures the writer always has a free slot even when two slots are
+    /// protected simultaneously: the previous _readIndex (skipped since the last commit) and
+    /// the _pinnedIndex (explicitly pinned by TryRead while the main thread uploads). When
+    /// the writer commits, it skips both protected slots before advancing the write head.
     ///
     /// Uses NativeArray&lt;byte&gt; instead of Marshal.AllocHGlobal for:
     /// - Leak detection in the Unity editor (missing Dispose calls are reported)
@@ -28,7 +28,7 @@ namespace Bluecadet.Hap
     /// </summary>
     internal sealed class HapFrameRingBuffer : IDisposable
     {
-        const int SlotCount = 3;
+        const int SlotCount = 4;
 
         /// <summary>Native memory buffers for decoded frame data.</summary>
         readonly NativeArray<byte>[] _slots;
@@ -46,6 +46,14 @@ namespace Bluecadet.Hap
         /// Volatile because it's written by the decode thread and read by the main thread.
         /// </summary>
         volatile int _readIndex = -1;
+
+        /// <summary>
+        /// Slot the main thread is currently uploading from (set by TryRead, cleared on next TryRead).
+        /// Volatile because it's written by the main thread and read by the decode thread in CommitWrite.
+        /// CommitWrite skips this slot when advancing the write head, preventing the decode thread from
+        /// overwriting data the main thread is still reading.
+        /// </summary>
+        volatile int _pinnedIndex = -1;
 
         /// <summary>
         /// 0 = not disposed, 1 = disposed.
@@ -101,12 +109,13 @@ namespace Bluecadet.Hap
             // Atomically publish this slot as the new read slot, and get the old read slot
             int prev = Interlocked.Exchange(ref _readIndex, _writeIndex);
 
-            // Advance write head to next slot
+            // Advance write head to next slot, skipping any slot that is protected:
+            //   prev        — the previous read slot, which the main thread may still be uploading from
+            //   _pinnedIndex — the slot explicitly pinned by TryRead for the current active upload
+            // With SlotCount=4 and at most 2 protected slots, there is always at least one free slot.
             int next = (_writeIndex + 1) % SlotCount;
-
-            // Skip over the slot the reader may still be using (the previous read slot).
-            // This prevents the writer from overwriting data during an in-progress upload.
-            if (next == prev)
+            int pinned = _pinnedIndex;
+            for (int guard = 0; guard < SlotCount - 1 && (next == prev || next == pinned); guard++)
                 next = (next + 1) % SlotCount;
 
             _writeIndex = next;
@@ -116,6 +125,9 @@ namespace Bluecadet.Hap
         /// Snapshot the current read slot atomically, returning both the frame index and data
         /// from the same _readIndex capture. Prefer this over separate property reads to avoid
         /// a TOCTOU race where _readIndex could change between them.
+        ///
+        /// Pins the slot before reading so CommitWrite won't reuse it while the caller is
+        /// still uploading from it (see _pinnedIndex).
         ///
         /// Returns false if no frame has been committed yet.
         /// Thread safety: Called only from the main thread.
@@ -130,7 +142,13 @@ namespace Bluecadet.Hap
                 return false;
             }
 
-            // Memory barrier ensures we read frameIndex and data after the slot index
+            // Pin the slot before reading its contents. The decode thread reads _pinnedIndex
+            // in CommitWrite and will skip this slot when choosing the next write target,
+            // preventing it from overwriting data we're about to upload.
+            _pinnedIndex = idx;
+
+            // Memory barrier ensures the pin is visible to the decode thread and that we
+            // read frameIndex and data after the slot index.
             Thread.MemoryBarrier();
             frameIndex = _frameIndices[idx];
             data = _slots[idx];
