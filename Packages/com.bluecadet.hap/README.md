@@ -87,43 +87,47 @@ Native C plugin handles demux + decode. C# handles playback logic, texture uploa
 
 ## Building the Native Plugin
 
-Requires CMake 3.15+.
+Requires Zig 0.16+.
 
-**macOS**
+Build the current host target:
 ```bash
 cd Native~
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+zig build -Doptimize=ReleaseFast
 ```
 
-To build a universal binary for both Apple Silicon and Intel:
+Build a specific target:
 ```bash
 cd Native~
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-cmake --build build
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
+zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
+zig build -Dtarget=aarch64-linux-gnu -Doptimize=ReleaseFast
 ```
-Verify with `lipo -info Plugins/bluecadet_hap.bundle`.
 
-**Windows (MSVC)**
-
-MSVC is a multi-configuration generator so the build type must be specified at build time, not configure time:
+Build every supported target:
 ```bash
 cd Native~
-cmake -B build
-cmake --build build --config Release
+zig build all -Doptimize=ReleaseFast
 ```
 
-The post-build step copies the output to `Plugins/`:
+Artifacts are written under `Native~/zig-out/<target>/`. Supported targets are `macos-arm64`, `macos-x86_64`, `windows-arm64`, `windows-x86_64`, `linux-arm64`, and `linux-x86_64`.
 
-| Platform | Output |
-|----------|--------|
-| macOS | `Plugins/bluecadet_hap.bundle` |
-| Windows | `Plugins/bluecadet_hap.dll` |
-| Linux | `Plugins/libbluecadet_hap.so` |
+To install build outputs directly into the package `Plugins/` directory, set Zig's install prefix:
+```bash
+cd Native~
+zig build all -p ../Plugins -Doptimize=ReleaseFast
+```
+
+The installed full-matrix outputs are placed under `Plugins/<target>/` so architectures with the same library filename do not overwrite each other.
+
+To install one selected target into `Plugins/`, run:
+```bash
+cd Native~
+zig build -p ../Plugins -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
+```
 
 ## Vendor Libraries
 
-All under `Native~/vendor/`. None are modified except as noted below.
+All under `Native~/vendor/`. The native build compiles the vendored source directly with Zig.
 
 | Library | Source | License |
 |---------|--------|---------|

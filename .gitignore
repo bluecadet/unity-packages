@@ -102,4 +102,6 @@ InitTestScene*.unity*
 
 /Projects
 
-!Packages/*/Plugins/*.dll
+!Packages/*/Plugins/**/*.dll
+!Packages/*/Plugins/**/*.bundle
+!Packages/*/Plugins/**/*.so

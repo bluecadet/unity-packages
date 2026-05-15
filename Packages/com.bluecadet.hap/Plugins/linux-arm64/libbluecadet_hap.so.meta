@@ -1,5 +1,5 @@
 fileFormatVersion: 2
-guid: 07d9634e7a47540468c5a1e9f769bbdc
+guid: 885e1aa4b88dd42a987896f6f822ffac
 PluginImporter:
   externalObjects: {}
   serializedVersion: 3
@@ -7,18 +7,22 @@ PluginImporter:
   executionOrder: {}
   defineConstraints: []
   isPreloaded: 0
-  isOverridable: 0
+  isOverridable: 1
   isExplicitlyReferenced: 0
   validateReferences: 1
   platformData:
+    Android:
+      enabled: 0
+      settings:
+        Is16KbAligned: true
     Any:
       enabled: 1
       settings:
         Exclude Editor: 0
         Exclude Linux64: 1
-        Exclude OSXUniversal: 0
-        Exclude Win: 1
-        Exclude Win64: 1
+        Exclude OSXUniversal: 1
+        Exclude Win: 0
+        Exclude Win64: 0
     Editor:
       enabled: 1
       settings:
@@ -28,17 +32,17 @@ PluginImporter:
     Linux64:
       enabled: 0
       settings:
-        CPU: x86_64
+        CPU: None
     OSXUniversal:
-      enabled: 1
-      settings:
-        CPU: AnyCPU
-    Win:
       enabled: 0
+      settings:
+        CPU: None
+    Win:
+      enabled: 1
       settings:
         CPU: x86
     Win64:
-      enabled: 0
+      enabled: 1
       settings:
         CPU: None
   userData: 
