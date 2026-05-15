@@ -104,6 +104,15 @@ namespace Bluecadet.Hap
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void hap_set_thread_count(IntPtr h, int count);
 
+        /// <summary>
+        /// Asynchronously warm the OS page cache for a compressed frame's data.
+        /// On Windows this calls PrefetchVirtualMemory; on other platforms it is a no-op.
+        /// Call from the decode thread with the next frame index while the current frame
+        /// is being displayed to hide page-fault latency for sequential playback.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hap_prefetch_frame(IntPtr h, int frameIndex);
+
         // ─────────────────────────────────────────────────────────────────────
         // Error codes
         // ─────────────────────────────────────────────────────────────────────

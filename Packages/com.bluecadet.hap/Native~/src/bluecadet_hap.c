@@ -223,3 +223,9 @@ void hap_set_thread_count(HapHandle *h, int count)
     if (!h) return;
     hap_decoder_set_thread_count(h->decoder, count);
 }
+
+void hap_prefetch_frame(HapHandle *h, int frame_index)
+{
+    if (!h || !h->demux) return;
+    hap_demux_prefetch_frame(h->demux, frame_index);
+}

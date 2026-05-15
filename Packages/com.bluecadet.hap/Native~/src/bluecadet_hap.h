@@ -51,6 +51,11 @@ HAP_EXPORT int        hap_decompress_frame(HapHandle *h, uint8_t *buf, int size)
 
 HAP_EXPORT void       hap_set_thread_count(HapHandle *h, int count);
 
+/* Asynchronously warm the OS page cache for a compressed frame.
+ * No-op on platforms other than Windows.
+ * Safe to call from any thread. */
+HAP_EXPORT void hap_prefetch_frame(HapHandle *h, int frame_index);
+
 #ifdef __cplusplus
 }
 #endif

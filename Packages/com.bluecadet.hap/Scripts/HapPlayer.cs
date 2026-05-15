@@ -66,8 +66,8 @@ namespace Bluecadet.Hap
         /// <summary>Opaque pointer to the native HapHandle (demuxer + decoder state).</summary>
         IntPtr _handle;
 
-        /// <summary>Ring buffer holding decoded frame data, shared between decode thread and main thread.</summary>
-        HapFrameRingBuffer _ringBuffer;
+        /// <summary>FIFO queue passing decoded frames from the decode thread to the main thread.</summary>
+        HapFrameQueue _queue;
 
         /// <summary>Manages the Texture2D and uploads raw DXT/BC7 data to it.</summary>
         HapTextureUploader _uploader;
@@ -95,6 +95,12 @@ namespace Bluecadet.Hap
 
         /// <summary>Frame index of the last frame uploaded to the texture (to avoid redundant uploads).</summary>
         int _lastUploadedFrame = -1;
+
+        /// <summary>
+        /// Playback direction when the last frame was uploaded (+1 or -1).
+        /// Used to detect direction reversals, which require a queue flush.
+        /// </summary>
+        int _lastUploadedDirection = 1;
 
         /// <summary>
         /// Unity frame count when the video was last opened. We skip GPU uploads in the same frame
@@ -344,13 +350,17 @@ namespace Bluecadet.Hap
                 RequestDecode(frame);
             }
 
-            // Upload the latest decoded frame to the GPU texture
+            // Upload the latest decoded frame to the back buffer (does NOT swap yet).
+            bool uploadedNewFrame;
             using (s_UploadMarker.Auto())
             {
-                UploadFrame();
+                uploadedNewFrame = UploadFrame();
             }
 
-            // Apply the texture to the output target based on render mode
+            // Apply the texture to the output target based on render mode.
+            // Reads from the FRONT buffer, which was written last frame — this
+            // guarantees a full command-list submission separates the Blit write
+            // from the scene's read, eliminating the D3D12 read/write hazard.
             using (s_RenderMarker.Auto())
             switch (renderMode)
             {
@@ -373,6 +383,11 @@ namespace Bluecadet.Hap
                     // User reads Texture property directly
                     break;
             }
+
+            // Promote the back buffer to front AFTER rendering so next frame's
+            // scene draw reads the frame we just wrote rather than a frame mid-blit.
+            if (uploadedNewFrame && _outputRTs != null)
+                _frontRTIndex = 1 - _frontRTIndex;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -475,8 +490,8 @@ namespace Bluecadet.Hap
             _height = HapNative.hap_get_height(_handle);
             int texFormat = HapNative.hap_get_texture_format(_handle);
 
-            // Create ring buffer for passing decoded frames from decode thread to main thread
-            _ringBuffer = new HapFrameRingBuffer(_frameBufferSize);
+            // Create FIFO queue for passing decoded frames from decode thread to main thread
+            _queue = new HapFrameQueue(_frameBufferSize);
 
             // Create texture uploader (manages the Texture2D)
             _uploader = new HapTextureUploader(_width, _height, texFormat);
@@ -512,6 +527,7 @@ namespace Bluecadet.Hap
 
             _clock = 0f;
             _lastUploadedFrame = -1;
+            _lastUploadedDirection = 1;
             _openedFrame = UnityEngine.Time.frameCount;
 
             // Start background decode thread
@@ -580,8 +596,8 @@ namespace Bluecadet.Hap
             _uploader?.Dispose();
             _uploader = null;
 
-            _ringBuffer?.Dispose();
-            _ringBuffer = null;
+            _queue?.Dispose();
+            _queue = null;
 
             if (_outputRTs != null)
             {
@@ -676,18 +692,32 @@ namespace Bluecadet.Hap
             IntPtr handle = _handle;
             int frameBufferSize = _frameBufferSize;
             int frameCount = _frameCount;
-            HapFrameRingBuffer ringBuffer = _ringBuffer;
+            HapFrameQueue queue = _queue;
 
             try
             {
-                int lastExplicit = -1;   // last frame satisfied in response to a main-thread request
-                int lastDecoded  = -1;   // most recent frame written to the ring buffer; -1 = nothing yet.
-                                         //   The pre-fetch guard (lastDecoded >= 0) depends on this sentinel.
+                int lastExplicit = -1;      // last frame satisfied in response to a main-thread request
+                int lastDecoded  = -1;      // most recent frame written to the queue; -1 = nothing yet
                 bool prefetchDone = false;
                 int consecutiveErrors = 0;  // circuit-breaker: stop on repeated native failures
+                int lastFlushVersion = queue?.FlushVersion ?? 0;  // tracks seek/flush events
 
                 while (_decodeRunning)
                 {
+                    // Detect a flush triggered by the main thread (seek or direction reversal).
+                    // Reset all local state so we don't incorrectly assume frames are in the queue.
+                    if (queue != null)
+                    {
+                        int fv = queue.FlushVersion;
+                        if (fv != lastFlushVersion)
+                        {
+                            lastFlushVersion = fv;
+                            lastDecoded  = -1;
+                            lastExplicit = -1;
+                            prefetchDone = false;
+                        }
+                    }
+
                     int target;
                     bool isPrefetch;
 
@@ -703,7 +733,7 @@ namespace Bluecadet.Hap
                         {
                             if (requested == lastDecoded)
                             {
-                                // Already in the ring buffer from a pre-fetch — no decode needed.
+                                // Already in the queue from a pre-fetch — no decode needed.
                                 // Apply the same sequential check as the explicit-decode path: only
                                 // enable pre-fetch if this request is the natural next frame from the
                                 // previous one. A seek that happens to land on the pre-fetched slot
@@ -712,7 +742,7 @@ namespace Bluecadet.Hap
                                               requested == (lastExplicit + dir + frameCount) % frameCount;
                                 lastExplicit = requested;
                                 prefetchDone = !wasSeq;
-                                // target == -1 is the sentinel meaning "already buffered, skip decode"
+                                // target == -1 is the sentinel meaning "already queued, skip decode"
                                 target = -1;
                                 isPrefetch = false;
                             }
@@ -744,9 +774,9 @@ namespace Bluecadet.Hap
                         }
                     }
 
-                    // Frame was already in the ring buffer — no decode work to do.
+                    // Frame was already in the queue — no decode work to do.
                     if (target == -1) continue;
-                    if (ringBuffer == null) break;
+                    if (queue == null) break;
 
                     // Belt-and-suspenders: if the handle was closed between our last
                     // _decodeRunning check and here, abort rather than crash into freed
@@ -754,16 +784,22 @@ namespace Bluecadet.Hap
                     // a second layer of defence, but this avoids the P/Invoke entirely.
                     if (!_handleValid) break;
 
-                    // Decode into the ring buffer's write slot.
+                    // Get the write slot. IntPtr.Zero means the queue is full (very unlikely
+                    // with Capacity=4 and at most 1 explicit + 1 prefetch in flight); skip and
+                    // wait for the main thread to consume before trying again.
+                    IntPtr buf = queue.GetWritePtr(out int writeVersion);
+                    if (buf == IntPtr.Zero)
+                    {
+                        // Yield briefly; next iteration will re-evaluate after Monitor.Wait wakes us
+                        lock (_decodeLock)
+                            Monitor.Wait(_decodeLock, 5);
+                        continue;
+                    }
+
+                    // Decode into the queue's write slot.
                     // Split into two timed steps so the profiler shows I/O vs CPU separately:
                     //   ReadSample  — memcpy from memory-mapped file (page-fault / disk latency)
-                    //   Decompress  — Snappy decompression via thread pool (pure CPU)
-                    //
-                    // GetWritePtr() extracts the raw pointer from the NativeArray for P/Invoke.
-                    // The unsafe context is required for NativeArray.GetUnsafePtr().
-                    IntPtr buf = ringBuffer.GetWritePtr();
-                    // readBytes > 0 means the native side stored the sample; native side
-                    // tracks the byte count internally so we don't pass it to Decompress.
+                    //   Decompress  — Snappy decompression (pure CPU)
                     int readBytes;
                     using (s_ReadSampleMarker.Auto())
                         readBytes = HapNative.hap_read_sample(handle, target);
@@ -783,10 +819,6 @@ namespace Bluecadet.Hap
                     {
                         consecutiveErrors++;
                         Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}, error: {result} ({consecutiveErrors} consecutive)");
-                        // Circuit-breaker: stop the decode loop if the native plugin keeps
-                        // returning errors.  This prevents log-spam and runaway CPU usage
-                        // when the file is corrupt or the handle is in a bad state, while
-                        // still allowing transient errors (e.g. a single bad frame) to pass.
                         if (consecutiveErrors >= 10)
                         {
                             Debug.LogError($"[HapPlayer] Decode loop aborting after {consecutiveErrors} consecutive errors on '{filePath}'");
@@ -796,22 +828,34 @@ namespace Bluecadet.Hap
                     else
                     {
                         consecutiveErrors = 0;
-                        ringBuffer.CommitWrite(target);
-                        lastDecoded = target;
+
+                        bool committed = queue.CommitWrite(target, writeVersion);
+                        if (committed)
+                        {
+                            lastDecoded = target;
+
+                            // Asynchronously warm the OS page cache for the next frame's compressed
+                            // data while the current frame is being displayed. On Windows this calls
+                            // PrefetchVirtualMemory and is a no-op on other platforms.
+                            if (!isPrefetch && frameCount > 1)
+                            {
+                                int nextFrame = (target + dir + frameCount) % frameCount;
+                                HapNative.hap_prefetch_frame(handle, nextFrame);
+                            }
+                        }
 
                         if (isPrefetch)
                         {
-                            prefetchDone = true;
+                            prefetchDone = committed; // if flush discarded the write, allow retry
                         }
                         else
                         {
                             // Only pre-fetch if this was a sequential step in the current
                             // direction. After a seek/scrub the next request is unpredictable,
                             // so skip the pre-fetch — don't waste a decode slot on the wrong frame.
-                            // dir handles both directions: +1 for forward, -1 for reverse.
-                            bool wasSequential = lastExplicit < 0 ||
-                                                 target == (lastExplicit + dir + frameCount) % frameCount;
-                            lastExplicit = target;
+                            bool wasSequential = committed && (lastExplicit < 0 ||
+                                                 target == (lastExplicit + dir + frameCount) % frameCount);
+                            if (committed) lastExplicit = target;
                             prefetchDone = !wasSequential;
                         }
                     }
@@ -829,39 +873,72 @@ namespace Bluecadet.Hap
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Upload the latest decoded frame from the ring buffer to the GPU texture.
+        /// Upload the next frame from the FIFO queue to the GPU back buffer.
+        /// Returns true if a new frame was blitted (caller must then swap front/back after rendering).
         /// Called from main thread in Update().
         /// </summary>
-        void UploadFrame()
+        bool UploadFrame()
         {
-            var ringBuffer = _ringBuffer;
-            if (ringBuffer == null) return;
+            var queue = _queue;
+            if (queue == null) return false;
 
             // Skip GPU uploads in the same frame that Open() ran. D3D12 requires at least one
             // command-list flush between RenderTexture.Create() and the first blit that targets it.
-            if (UnityEngine.Time.frameCount == _openedFrame) return;
+            if (UnityEngine.Time.frameCount == _openedFrame) return false;
 
-            // Snapshot both frame index and data from the same _readIndex capture.
-            // Separate property reads would each re-read _readIndex, which the
-            // decode thread can change between them, producing a mismatched frame/data pair.
-            if (!ringBuffer.TryRead(out int readFrame, out var data)) return;
-            if (readFrame == _lastUploadedFrame) return;
+            int dir = _decodeDirection;
+            int desiredFrame = ClockToFrame(_clock);
 
-            // Upload the raw DXT/BC7 data to the texture
+            // Detect seeks and direction reversals: flush the queue so stale pre-fetched frames
+            // from the old playback position don't appear on screen.
+            if (_lastUploadedFrame >= 0)
+            {
+                bool directionChanged = dir != _lastUploadedDirection;
+                bool isSeek = false;
+                if (!directionChanged)
+                {
+                    // A jump of more than a few frames in the current direction is a seek.
+                    // The modulo wraps correctly for loop boundaries (last→first is sequential).
+                    int delta = dir >= 0
+                        ? (desiredFrame - _lastUploadedFrame + _frameCount) % _frameCount
+                        : (_lastUploadedFrame - desiredFrame + _frameCount) % _frameCount;
+                    isSeek = delta > 3;
+                }
+                if (directionChanged || isSeek)
+                {
+                    queue.Flush();
+                    RequestDecode(desiredFrame);
+                }
+            }
+
+            if (!queue.TryPeek(desiredFrame, dir, out int readFrame, out var data)) return false;
+
+            // Duplicate frame: consume and skip (the front buffer still shows the correct image).
+            if (readFrame == _lastUploadedFrame)
+            {
+                queue.Consume();
+                return false;
+            }
+
+            // Upload the raw DXT/BC7 data into Unity's texture (CPU memcpy).
             _uploader.Upload(data);
 
-            // Blit through the output shader (flip orientation and/or YCoCg decode) into the
-            // back buffer, then promote it to front. This ping-pong ensures the GPU never reads
-            // and writes the same RenderTexture simultaneously — the scene renderer reads the
-            // front buffer (written last frame) while we write to the back buffer (unused last frame).
+            // Release the queue slot now that the CPU copy is done.
+            // The decode thread may reuse this slot's NativeArray memory from this point.
+            queue.Consume();
+
+            // Blit through the output shader (flip + optional YCoCg decode) into the back buffer.
+            // The caller promotes back→front AFTER the scene has rendered from the current front
+            // buffer, so the two RTs are always different resources during any given frame.
             if (_outputRTs != null && _outputMat != null)
             {
                 int backRTIndex = 1 - _frontRTIndex;
                 Graphics.Blit(_uploader.Texture, _outputRTs[backRTIndex], _outputMat);
-                _frontRTIndex = backRTIndex;
             }
 
             _lastUploadedFrame = readFrame;
+            _lastUploadedDirection = dir;
+            return _outputRTs != null && _outputMat != null;
         }
     }
 }

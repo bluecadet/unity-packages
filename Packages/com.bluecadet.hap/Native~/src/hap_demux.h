@@ -33,4 +33,12 @@ int hap_demux_read_sample(HapDemux *d, int frame_index, uint8_t *buf, int buf_si
  */
 int hap_demux_get_max_sample_size(HapDemux *d);
 
+/*
+ * Asynchronously prefetch a frame's compressed data into the OS page cache.
+ * On Windows this calls PrefetchVirtualMemory; on other platforms it is a no-op.
+ * Call from the decode thread with the NEXT frame index while the current frame
+ * is being displayed, to hide page-fault latency.
+ */
+void hap_demux_prefetch_frame(HapDemux *d, int frame_index);
+
 #endif /* HAP_DEMUX_H */

@@ -33,11 +33,9 @@ static int mapped_file_open(PlatformFile *pf, const char *path,
     pf->file_handle    = INVALID_HANDLE_VALUE;
     pf->mapping_handle = NULL;
 
-    /* FILE_FLAG_RANDOM_ACCESS tells Windows not to bother with sequential
-     * read-ahead prefetch, which is counter-productive during scrubbing. */
     pf->file_handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ,
                                    NULL, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+                                   FILE_ATTRIBUTE_NORMAL,
                                    NULL);
     if (pf->file_handle == INVALID_HANDLE_VALUE) return 0;
 
@@ -422,4 +420,24 @@ int hap_demux_read_sample(HapDemux *d, int frame_index, uint8_t *buf, int buf_si
     /* Copy from mapped memory — no fseek, no fread, no syscall */
     memcpy(buf, d->mapped_data + (size_t)ofs, frame_bytes);
     return (int)frame_bytes;
+}
+
+void hap_demux_prefetch_frame(HapDemux *d, int frame_index)
+{
+#ifdef _WIN32
+    if (!d || !d->frame_offsets || !d->frame_sizes) return;
+    if (frame_index < 0 || frame_index >= d->frame_count) return;
+
+    MP4D_file_offset_t ofs = d->frame_offsets[frame_index];
+    unsigned frame_bytes   = d->frame_sizes[frame_index];
+    if (frame_bytes == 0 || ofs == 0) return;
+    if ((uint64_t)ofs + frame_bytes > (uint64_t)d->mapped_size) return;
+
+    WIN32_MEMORY_RANGE_ENTRY range;
+    range.VirtualAddress = (PVOID)(d->mapped_data + (size_t)ofs);
+    range.NumberOfBytes  = (SIZE_T)frame_bytes;
+    PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+#else
+    (void)d; (void)frame_index;
+#endif
 }
