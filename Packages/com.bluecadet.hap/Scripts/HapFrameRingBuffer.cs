@@ -6,181 +6,169 @@ using Unity.Collections.LowLevel.Unsafe;
 namespace Bluecadet.Hap
 {
     /// <summary>
-    /// A FIFO queue for passing decoded video frames from the decode thread to the main thread.
+    /// A lock-free ring buffer for passing decoded video frames from a background
+    /// decode thread to the main thread.
     ///
-    /// Frames are delivered in commit order. The main thread's TryPeek applies a clock gate:
-    /// a pre-fetched frame whose index is ahead of the playback clock is held in the queue
-    /// rather than returned early, eliminating the ±1-display-frame timing jitter that a
-    /// "latest wins" ring buffer produces.
+    /// Design:
+    /// - 4 slots backed by NativeArray&lt;byte&gt; (Allocator.Persistent), each large enough
+    ///   to hold one decoded frame
+    /// - Writer (decode thread) writes to WriteSlot, then calls CommitWrite
+    /// - Reader (main thread) reads from TryRead (atomic snapshot of both frame index and data)
+    /// - No locks during steady-state operation — uses volatile + memory barriers
     ///
-    /// Thread model: single writer (decode thread), single reader (main thread).
+    /// The 4-slot design ensures the writer always has a free slot even when two slots are
+    /// protected simultaneously: the previous _readIndex (skipped since the last commit) and
+    /// the _pinnedIndex (explicitly pinned by TryRead while the main thread uploads). When
+    /// the writer commits, it skips both protected slots before advancing the write head.
     ///
-    /// Flush/seek: the main thread calls Flush() when a seek is detected, incrementing a
-    /// generation counter. Stale slots (from before the flush) are silently drained by
-    /// TryPeek. The decode thread polls FlushVersion to detect flushes and reset its state.
-    ///
-    /// Separate TryPeek/Consume: TryPeek does NOT advance the read head. Consume() does.
-    /// This separation ensures the decode thread cannot reuse a slot while the main thread
-    /// is still memcpy-ing from it inside Upload(). Call Consume() after Upload() returns.
-    ///
-    /// Capacity = 4: supports 1 explicit decode + 1 prefetch + 2 safety slots. The full
-    /// guard in GetWritePtr prevents the decode thread from lapping the read head.
+    /// Uses NativeArray&lt;byte&gt; instead of Marshal.AllocHGlobal for:
+    /// - Leak detection in the Unity editor (missing Dispose calls are reported)
+    /// - Double-free and use-after-dispose safety checks in editor
+    /// - Direct compatibility with Texture2D.LoadRawTextureData(NativeArray)
     /// </summary>
-    internal sealed class HapFrameQueue : IDisposable
+    internal sealed class HapFrameRingBuffer : IDisposable
     {
-        const int Capacity = 4;
+        const int SlotCount = 4;
 
+        /// <summary>Native memory buffers for decoded frame data.</summary>
         readonly NativeArray<byte>[] _slots;
+
+        /// <summary>Frame index stored in each slot (-1 if empty).</summary>
         readonly int[] _frameIndices;
-        readonly int[] _slotVersions;
+
         readonly int _slotSize;
 
-        // Monotonically increasing. Decode thread is sole writer; main thread reads for empty check.
-        volatile int _tail;
+        /// <summary>Next slot the writer will write into.</summary>
+        int _writeIndex;
 
-        // Monotonically increasing. Main thread is sole writer; decode thread reads for full check.
-        volatile int _head;
+        /// <summary>
+        /// Slot containing the most recently committed frame, available for reading.
+        /// Volatile because it's written by the decode thread and read by the main thread.
+        /// </summary>
+        volatile int _readIndex = -1;
 
-        // Incremented by main thread on flush/seek. Both threads read; only main thread writes.
-        volatile int _flushVersion;
+        /// <summary>
+        /// Slot the main thread is currently uploading from (set by TryRead, cleared on next TryRead).
+        /// Volatile because it's written by the main thread and read by the decode thread in CommitWrite.
+        /// CommitWrite skips this slot when advancing the write head, preventing the decode thread from
+        /// overwriting data the main thread is still reading.
+        /// </summary>
+        volatile int _pinnedIndex = -1;
 
+        /// <summary>
+        /// 0 = not disposed, 1 = disposed.
+        /// Int rather than bool so Interlocked.CompareExchange can guard the dispose
+        /// against concurrent calls.
+        /// </summary>
         int _disposed;
 
-        /// <summary>Current flush generation. Decode thread polls this to detect seeks.</summary>
-        public int FlushVersion => _flushVersion;
+        public int SlotSize => _slotSize;
 
-        public HapFrameQueue(int slotSize)
+        public HapFrameRingBuffer(int slotSize)
         {
             _slotSize = slotSize;
-            _slots = new NativeArray<byte>[Capacity];
-            _frameIndices = new int[Capacity];
-            _slotVersions = new int[Capacity];
+            _slots = new NativeArray<byte>[SlotCount];
+            _frameIndices = new int[SlotCount];
 
-            for (int i = 0; i < Capacity; i++)
+            for (int i = 0; i < SlotCount; i++)
             {
                 _slots[i] = new NativeArray<byte>(slotSize, Allocator.Persistent,
                     NativeArrayOptions.UninitializedMemory);
                 _frameIndices[i] = -1;
-                _slotVersions[i] = -1; // sentinel: no valid version is -1
             }
         }
 
-        // ── Decode-thread write path ──────────────────────────────────────────
+        /// <summary>
+        /// The current write slot as a NativeArray. The decode thread writes decoded frame data here.
+        /// </summary>
+        public NativeArray<byte> WriteSlot => _slots[_writeIndex];
 
         /// <summary>
-        /// Get a raw pointer to the next write slot.
-        /// Returns IntPtr.Zero if the queue is full (decode thread should back off).
-        /// Also outputs the current flush version so CommitWrite can detect a concurrent flush.
+        /// Get the raw pointer to the current write slot for P/Invoke interop.
+        /// Caller must be in an unsafe context.
         /// </summary>
-        public unsafe IntPtr GetWritePtr(out int version)
+        public unsafe IntPtr GetWritePtr()
         {
-            version = _flushVersion;
-            if (_tail - _head >= Capacity) return IntPtr.Zero; // full
-            return (IntPtr)_slots[_tail % Capacity].GetUnsafePtr();
+            return (IntPtr)_slots[_writeIndex].GetUnsafePtr();
         }
 
         /// <summary>
-        /// Publish the data written to the current write slot.
-        /// Returns false if a Flush happened between GetWritePtr and CommitWrite — in that
-        /// case the caller should discard the write and not update its lastDecoded state.
+        /// Mark the current write slot as containing a decoded frame and make it available
+        /// for reading. Advances the write head to the next slot.
+        ///
+        /// Thread safety: Called only from the decode thread.
         /// </summary>
-        public bool CommitWrite(int frameIndex, int version)
+        public void CommitWrite(int frameIndex)
         {
-            if (version != _flushVersion) return false; // flush during write: discard
-            if (_tail - _head >= Capacity) return false; // full (safety guard)
+            // Store the frame index in the current write slot
+            _frameIndices[_writeIndex] = frameIndex;
 
-            int slot = _tail % Capacity;
-            _frameIndices[slot] = frameIndex;
-            _slotVersions[slot] = version;
-            Thread.MemoryBarrier(); // ensure data/metadata visible before tail advance
-            _tail++;
+            // Memory barrier ensures the frame data and index are visible before we publish
+            Thread.MemoryBarrier();
+
+            // Atomically publish this slot as the new read slot, and get the old read slot
+            int prev = Interlocked.Exchange(ref _readIndex, _writeIndex);
+
+            // Advance write head to next slot, skipping any slot that is protected:
+            //   prev        — the previous read slot, which the main thread may still be uploading from
+            //   _pinnedIndex — the slot explicitly pinned by TryRead for the current active upload
+            // With SlotCount=4 and at most 2 protected slots, there is always at least one free slot.
+            int next = (_writeIndex + 1) % SlotCount;
+            int pinned = _pinnedIndex;
+            for (int guard = 0; guard < SlotCount - 1 && (next == prev || next == pinned); guard++)
+                next = (next + 1) % SlotCount;
+
+            _writeIndex = next;
+        }
+
+        /// <summary>
+        /// Snapshot the current read slot atomically, returning both the frame index and data
+        /// from the same _readIndex capture. Prefer this over separate property reads to avoid
+        /// a TOCTOU race where _readIndex could change between them.
+        ///
+        /// Pins the slot before reading so CommitWrite won't reuse it while the caller is
+        /// still uploading from it (see _pinnedIndex).
+        ///
+        /// Returns false if no frame has been committed yet.
+        /// Thread safety: Called only from the main thread.
+        /// </summary>
+        public bool TryRead(out int frameIndex, out NativeArray<byte> data)
+        {
+            int idx = _readIndex;
+            if (idx < 0)
+            {
+                frameIndex = -1;
+                data = default;
+                return false;
+            }
+
+            // Pin the slot before reading its contents. The decode thread reads _pinnedIndex
+            // in CommitWrite and will skip this slot when choosing the next write target,
+            // preventing it from overwriting data we're about to upload.
+            _pinnedIndex = idx;
+
+            // Memory barrier ensures the pin is visible to the decode thread and that we
+            // read frameIndex and data after the slot index.
+            Thread.MemoryBarrier();
+            frameIndex = _frameIndices[idx];
+            data = _slots[idx];
             return true;
         }
 
-        // ── Main-thread read path ─────────────────────────────────────────────
-
         /// <summary>
-        /// Peek at the oldest queued frame without consuming it.
-        ///
-        /// Stale slots (version mismatch after a Flush) are silently drained first.
-        ///
-        /// Clock gate: if the oldest frame's index is ahead of the playback clock
-        /// (pre-fetched but not yet needed), returns false WITHOUT consuming the slot.
-        /// The frame stays in the queue and will be returned on a future call when
-        /// clockFrame catches up.
-        ///
-        /// Parameters:
-        ///   clockFrame  — ClockToFrame(_clock): the video frame the clock is currently at
-        ///   direction   — +1 for forward, -1 for reverse
-        ///
-        /// After a successful peek, call Consume() once Upload() has finished copying
-        /// from the returned data buffer.
+        /// Free all native memory. Safe to call multiple times and from any thread —
+        /// Interlocked.CompareExchange ensures only the first caller runs the dispose loop.
         /// </summary>
-        public bool TryPeek(int clockFrame, int direction,
-                            out int frameIndex, out NativeArray<byte> data)
-        {
-            while (_tail != _head)
-            {
-                Thread.MemoryBarrier();
-                int slot = _head % Capacity;
-
-                // Drain version-stale slots (written before the last Flush).
-                if (_slotVersions[slot] != _flushVersion) { _head++; continue; }
-
-                int fi = _frameIndices[slot];
-
-                // Clock gate: hold pre-fetched frames that are ahead of the playback clock.
-                // Forward: fi > clockFrame means the frame is in the future — hold.
-                // Reverse: fi < clockFrame means the frame is in the future (going back) — hold.
-                bool tooEarly = direction >= 0 ? fi > clockFrame : fi < clockFrame;
-                if (tooEarly) { frameIndex = -1; data = default; return false; }
-
-                // Drain frames that are behind the clock when a newer frame is already
-                // in the queue. This prevents stale pre-fetches from blocking the desired
-                // frame after a scrub. If this is the only frame available, return it
-                // anyway — it's the best we have (e.g. decode thread is 1 frame slow).
-                bool isPast = direction >= 0 ? fi < clockFrame : fi > clockFrame;
-                if (isPast && _tail - _head > 1) { _head++; continue; }
-
-                frameIndex = fi;
-                data = _slots[slot];
-                return true;
-            }
-
-            frameIndex = -1;
-            data = default;
-            return false;
-        }
-
-        /// <summary>
-        /// Advance the read head, releasing the peeked slot so the decode thread
-        /// may reuse its memory. Must be called after Upload() has finished copying
-        /// from the slot's NativeArray.
-        /// </summary>
-        public void Consume()
-        {
-            _head++;
-        }
-
-        // ── Flush (main thread, on seek) ──────────────────────────────────────
-
-        /// <summary>
-        /// Invalidate all currently queued frames. Called by the main thread when a seek
-        /// is detected. Stale frames are drained lazily by TryPeek on subsequent calls.
-        /// The decode thread detects the generation change via FlushVersion.
-        /// </summary>
-        public void Flush()
-        {
-            Interlocked.Increment(ref _flushVersion);
-        }
-
-        // ── Dispose ───────────────────────────────────────────────────────────
-
         public void Dispose()
         {
-            if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
-            for (int i = 0; i < Capacity; i++)
-                if (_slots[i].IsCreated) _slots[i].Dispose();
+            if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
+                return;
+
+            for (int i = 0; i < SlotCount; i++)
+            {
+                if (_slots[i].IsCreated)
+                    _slots[i].Dispose();
+            }
         }
     }
 }
