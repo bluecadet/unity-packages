@@ -9,6 +9,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+/* Forward-declare only what we need from timeapi.h/mmsystem.h to avoid
+ * pulling in windows.h (which conflicts with Zig's bundled MinGW headers
+ * when included without a prior windows.h baseline). */
+typedef unsigned int MMRESULT;
+__declspec(dllimport) MMRESULT __stdcall timeBeginPeriod(unsigned int uPeriod);
+__declspec(dllimport) MMRESULT __stdcall timeEndPeriod(unsigned int uPeriod);
+#endif
+
 struct HapHandle {
     HapDemux    *demux;
     HapDecoder  *decoder;
@@ -140,12 +149,26 @@ HapHandle *hap_open(const char *path, HapError *err)
     }
 
     if (err) *err = HAP_ERROR_NONE;
+
+#ifdef _WIN32
+    /* Raise the Windows multimedia timer resolution to 1 ms for the lifetime of
+     * this handle. The default resolution (15.625 ms) means the OS scheduler can
+     * delay waking the C# decode thread by up to ~15 ms after Monitor.Pulse fires,
+     * consuming nearly half the per-frame budget at 24 fps. At 1 ms the wake-up
+     * latency drops to <2 ms.  Windows ref-counts these calls, so multiple open
+     * handles each call timeBeginPeriod and each balanced timeEndPeriod — correct. */
+    timeBeginPeriod(1);
+#endif
+
     return h;
 }
 
 void hap_close(HapHandle *h)
 {
     if (!h) return;
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
     free(h->sample_buf);
     hap_decoder_destroy(h->decoder);
     hap_demux_close(h->demux);

@@ -75,8 +75,8 @@ fn addHapPlugin(
     module.addCMacro("HAVE_CONFIG_H", "1");
     if (target.result.os.tag == .windows) {
         module.addCMacro("_CRT_SECURE_NO_WARNINGS", "1");
-        module.addCMacro("_WIN32_WINNT", "0x0602");
         module.linkSystemLibrary("kernel32", .{});
+        module.linkSystemLibrary("winmm", .{});
     } else {
         if (target.result.os.tag == .linux) {
             module.addCMacro("_GNU_SOURCE", "1");
