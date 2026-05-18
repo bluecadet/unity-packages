@@ -452,7 +452,11 @@ namespace Bluecadet.Hap
             // Guard against double-open (e.g. OnEnable called unexpectedly while already playing).
             // Without this, a second call would overwrite _handle and start a second decode thread
             // while the first one keeps running, leaking both the old handle and thread.
-            if (IsOpen) return;
+            if (IsOpen)
+            {
+                Debug.LogWarning($"[HapPlayer] Open() called while already open ('{filePath}'). Call Close() first.");
+                return;
+            }
 
             string resolved = ResolvePath(filePath);
 
@@ -698,13 +702,14 @@ namespace Bluecadet.Hap
                 {
                     int target;
                     bool isPrefetch;
-
-                    // Snapshot direction once per iteration (volatile, no lock needed).
-                    // dir = +1 for forward playback, -1 for reverse.
-                    int dir = _decodeDirection;
+                    int dir;
 
                     lock (_decodeLock)
                     {
+                        // Snapshot direction inside the lock so it is always consistent with
+                        // _decodeTargetFrame. Reading it outside could produce a stale direction
+                        // (e.g. the first pre-fetch after a reversal would go the wrong way).
+                        dir = _decodeDirection;
                         int requested = _decodeTargetFrame;
 
                         if (requested != lastExplicit)
@@ -798,10 +803,10 @@ namespace Bluecadet.Hap
                         ringBuffer.CommitWrite(target);
                         lastDecoded = target;
 
-                        // Asynchronously warm the OS page cache for the next frame's compressed
-                        // data while the current frame is being displayed. On Windows this calls
-                        // PrefetchVirtualMemory and is a no-op on other platforms.
-                        if (!isPrefetch && frameCount > 1)
+                        // Asynchronously warm the OS page cache for the next-in-sequence frame.
+                        // Warming after both explicit and pre-fetch decodes keeps the pipeline
+                        // two frames ahead rather than one. No-op on non-Windows platforms.
+                        if (frameCount > 1)
                         {
                             int nextFrame = (target + dir + frameCount) % frameCount;
                             HapNative.hap_prefetch_frame(handle, nextFrame);
@@ -858,9 +863,16 @@ namespace Bluecadet.Hap
             // Upload the raw DXT/BC7 data into Unity's texture (CPU memcpy).
             _uploader.Upload(data);
 
+            // CPU copy is done — release the ring-buffer pin so the decode thread can
+            // reuse the slot immediately rather than waiting for the next TryRead call.
+            ringBuffer.ClearPin();
+
             // Blit through the output shader (flip + optional YCoCg decode) into the back buffer.
             // The caller promotes back→front AFTER the scene has rendered from the current front
             // buffer, so the two RTs are always different resources during any given frame.
+            // Note: this means RenderTexture mode's output is always one frame behind the blit
+            // — the D3D12 hazard prevention requires it. The alternative (swap before render)
+            // would read and write the same RT in the same command list.
             if (_outputRTs != null && _outputMat != null)
             {
                 int backRTIndex = 1 - _frontRTIndex;
