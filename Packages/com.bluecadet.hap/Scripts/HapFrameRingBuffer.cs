@@ -48,12 +48,13 @@ namespace Bluecadet.Hap
         volatile int _readIndex = -1;
 
         /// <summary>
-        /// Slot the main thread is currently uploading from (set by TryRead, cleared on next TryRead).
-        /// Volatile because it's written by the main thread and read by the decode thread in CommitWrite.
-        /// CommitWrite skips this slot when advancing the write head, preventing the decode thread from
-        /// overwriting data the main thread is still reading.
+        /// Slot the main thread is currently uploading from (set by TryRead, cleared by ClearPin).
+        /// Written via Interlocked.Exchange (full fence) so CommitWrite — which reads it after its
+        /// own Interlocked.Exchange on _readIndex — is guaranteed to observe the updated value.
+        /// CommitWrite skips this slot when advancing the write head, preventing the decode thread
+        /// from overwriting data the main thread is still reading.
         /// </summary>
-        volatile int _pinnedIndex = -1;
+        int _pinnedIndex = -1;
 
         /// <summary>
         /// 0 = not disposed, 1 = disposed.
@@ -127,7 +128,13 @@ namespace Bluecadet.Hap
         /// a TOCTOU race where _readIndex could change between them.
         ///
         /// Pins the slot before reading so CommitWrite won't reuse it while the caller is
-        /// still uploading from it (see _pinnedIndex).
+        /// still uploading from it (see _pinnedIndex). Uses Interlocked.Exchange for the pin
+        /// write to provide a full memory fence, closing the TOCTOU window between the index
+        /// snapshot and the pin. A re-read after the fence detects a concurrent CommitWrite
+        /// and updates the pin to the fresher frame.
+        ///
+        /// After the CPU upload completes, call ClearPin() to release the slot back to the
+        /// decode thread as early as possible.
         ///
         /// Returns false if no frame has been committed yet.
         /// Thread safety: Called only from the main thread.
@@ -142,17 +149,35 @@ namespace Bluecadet.Hap
                 return false;
             }
 
-            // Pin the slot before reading its contents. The decode thread reads _pinnedIndex
-            // in CommitWrite and will skip this slot when choosing the next write target,
-            // preventing it from overwriting data we're about to upload.
-            _pinnedIndex = idx;
+            // Pin the slot with a full fence so CommitWrite (which reads _pinnedIndex after its
+            // own Interlocked.Exchange on _readIndex) is guaranteed to see the pin and skip this slot.
+            Interlocked.Exchange(ref _pinnedIndex, idx);
 
-            // Memory barrier ensures the pin is visible to the decode thread and that we
-            // read frameIndex and data after the slot index.
-            Thread.MemoryBarrier();
+            // Re-read _readIndex after the fence. If the decode thread committed a newer frame
+            // between our initial snapshot and the pin, update to the fresher slot so we always
+            // return the most recent frame and the correct slot is pinned.
+            int confirmed = _readIndex;
+            if (confirmed != idx && confirmed >= 0)
+            {
+                Interlocked.Exchange(ref _pinnedIndex, confirmed);
+                idx = confirmed;
+            }
+
+            Thread.MemoryBarrier(); // ensure slot data is read after _pinnedIndex is visible
             frameIndex = _frameIndices[idx];
             data = _slots[idx];
             return true;
+        }
+
+        /// <summary>
+        /// Release the pin set by TryRead once the CPU upload is complete.
+        /// This allows the decode thread to reuse the slot as soon as possible rather
+        /// than waiting until the next TryRead call.
+        /// Thread safety: Called only from the main thread.
+        /// </summary>
+        public void ClearPin()
+        {
+            Interlocked.Exchange(ref _pinnedIndex, -1);
         }
 
         /// <summary>
