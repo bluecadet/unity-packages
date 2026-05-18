@@ -119,29 +119,37 @@ namespace Bluecadet.Hap
         public bool TryPeek(int clockFrame, int direction,
                             out int frameIndex, out NativeArray<byte> data)
         {
-            // Drain stale slots from before the last Flush.
             while (_tail != _head)
             {
                 Thread.MemoryBarrier();
-                if (_slotVersions[_head % Capacity] == _flushVersion) break;
-                _head++; // discard stale slot (safe: only increments the read counter)
+                int slot = _head % Capacity;
+
+                // Drain version-stale slots (written before the last Flush).
+                if (_slotVersions[slot] != _flushVersion) { _head++; continue; }
+
+                int fi = _frameIndices[slot];
+
+                // Clock gate: hold pre-fetched frames that are ahead of the playback clock.
+                // Forward: fi > clockFrame means the frame is in the future — hold.
+                // Reverse: fi < clockFrame means the frame is in the future (going back) — hold.
+                bool tooEarly = direction >= 0 ? fi > clockFrame : fi < clockFrame;
+                if (tooEarly) { frameIndex = -1; data = default; return false; }
+
+                // Drain frames that are behind the clock when a newer frame is already
+                // in the queue. This prevents stale pre-fetches from blocking the desired
+                // frame after a scrub. If this is the only frame available, return it
+                // anyway — it's the best we have (e.g. decode thread is 1 frame slow).
+                bool isPast = direction >= 0 ? fi < clockFrame : fi > clockFrame;
+                if (isPast && _tail - _head > 1) { _head++; continue; }
+
+                frameIndex = fi;
+                data = _slots[slot];
+                return true;
             }
 
-            if (_tail == _head) { frameIndex = -1; data = default; return false; }
-
-            Thread.MemoryBarrier();
-            int slot = _head % Capacity;
-            int fi = _frameIndices[slot];
-
-            // Clock gate: hold pre-fetched frames until the clock reaches them.
-            // Forward: fi > clockFrame means the frame is in the future — hold.
-            // Reverse: fi < clockFrame means the frame is in the future (going back) — hold.
-            bool tooEarly = direction >= 0 ? fi > clockFrame : fi < clockFrame;
-            if (tooEarly) { frameIndex = -1; data = default; return false; }
-
-            frameIndex = fi;
-            data = _slots[slot];
-            return true;
+            frameIndex = -1;
+            data = default;
+            return false;
         }
 
         /// <summary>
