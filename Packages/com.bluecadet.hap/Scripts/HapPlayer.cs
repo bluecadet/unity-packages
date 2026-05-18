@@ -96,6 +96,9 @@ namespace Bluecadet.Hap
         /// <summary>Frame index of the last frame uploaded to the texture (to avoid redundant uploads).</summary>
         int _lastUploadedFrame = -1;
 
+        /// <summary>ClockToFrame(_clock) from the previous UploadFrame call, used for seek detection.</summary>
+        int _lastDesiredFrame = -1;
+
         /// <summary>
         /// Playback direction when the last frame was uploaded (+1 or -1).
         /// Used to detect direction reversals, which require a queue flush.
@@ -527,6 +530,7 @@ namespace Bluecadet.Hap
 
             _clock = 0f;
             _lastUploadedFrame = -1;
+            _lastDesiredFrame = -1;
             _lastUploadedDirection = 1;
             _openedFrame = UnityEngine.Time.frameCount;
 
@@ -632,6 +636,7 @@ namespace Bluecadet.Hap
             _frameRate = 0;
             _duration = 0;
             _lastUploadedFrame = -1;
+            _lastDesiredFrame = -1;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -891,25 +896,39 @@ namespace Bluecadet.Hap
 
             // Detect seeks and direction reversals: flush the queue so stale pre-fetched frames
             // from the old playback position don't appear on screen.
-            if (_lastUploadedFrame >= 0)
+            if (_lastDesiredFrame >= 0)
             {
                 bool directionChanged = dir != _lastUploadedDirection;
                 bool isSeek = false;
                 if (!directionChanged)
                 {
-                    // A jump of more than a few frames in the current direction is a seek.
-                    // The modulo wraps correctly for loop boundaries (last→first is sequential).
+                    // Compare against the clock position from the previous frame, not the
+                    // last uploaded frame. This prevents decode hiccups (TryPeek returning
+                    // false for several frames) from being mistaken for seeks.
                     int delta = dir >= 0
-                        ? (desiredFrame - _lastUploadedFrame + _frameCount) % _frameCount
-                        : (_lastUploadedFrame - desiredFrame + _frameCount) % _frameCount;
-                    isSeek = delta > 3;
+                        ? (desiredFrame - _lastDesiredFrame + _frameCount) % _frameCount
+                        : (_lastDesiredFrame - desiredFrame + _frameCount) % _frameCount;
+                    // Speed-aware threshold: at Nx playback the clock legitimately jumps
+                    // N frames/Update; a seek jumps hundreds. max(8,...) gives 133ms of
+                    // decode-hiccup tolerance at 60fps even at 1x.
+                    int seekThreshold = Mathf.Max(8, Mathf.CeilToInt(Mathf.Abs(playbackSpeed) * 4f));
+                    isSeek = delta > seekThreshold;
                 }
                 if (directionChanged || isSeek)
                 {
                     queue.Flush();
-                    RequestDecode(desiredFrame);
+                    // Force-wake the decode thread even if desiredFrame == _decodeTargetFrame.
+                    // After Flush() the queue is empty; the decode thread must re-decode the
+                    // same frame, but RequestDecode's dedup guard would silently skip the Pulse.
+                    lock (_decodeLock)
+                    {
+                        _decodeTargetFrame = -1;       // break the dedup guard
+                        _decodeTargetFrame = desiredFrame;
+                        Monitor.Pulse(_decodeLock);
+                    }
                 }
             }
+            _lastDesiredFrame = desiredFrame;  // always update, even when TryPeek returns false
 
             if (!queue.TryPeek(desiredFrame, dir, out int readFrame, out var data)) return false;
 
