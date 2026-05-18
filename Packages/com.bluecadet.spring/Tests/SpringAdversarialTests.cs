@@ -282,18 +282,19 @@ namespace Bluecadet.Spring.Tests
         [Test]
         public void SpringWith_MinStiffness_DoesNotCrash()
         {
+            // Stiffness 0.001 with default damping is massively overdamped (ζ ≈ 400+).
+            // Convergence would take tens of thousands of simulated seconds — don't assert IsFinished.
+            // Goal: verify no NaN/Inf/exception regardless of damping regime.
             var spring = Spring.Create(0f).WithStiffness(0.001f);
             spring.To(1f);
 
             float dt = 0.016f;
-            for (int i = 0; i < 100000; i++)
+            for (int i = 0; i < 10000; i++)
             {
-                if (spring.IsFinished) break;
                 spring.Advance(dt);
+                Assert.That(float.IsNaN(spring.Value),  Is.False, $"NaN at step {i}");
+                Assert.That(float.IsInfinity(spring.Value), Is.False, $"Inf at step {i}");
             }
-
-            Assert.IsTrue(spring.IsFinished,
-                "Spring with minimum stiffness should eventually converge (very slowly).");
         }
     }
 }
