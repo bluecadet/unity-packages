@@ -2,6 +2,41 @@
 
 A custom Unity input module for handling multi-touch input on touchscreen installations, with gesture detection for pan and pinch interactions.
 
+## Installation
+
+**Via openUPM (recommended)**
+
+```sh
+openupm add com.bluecadet.touchscreen
+```
+
+Or add the scoped registry manually to `Packages/manifest.json`:
+
+```json
+{
+  "scopedRegistries": [
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": ["com.bluecadet"]
+    }
+  ],
+  "dependencies": {
+    "com.bluecadet.touchscreen": "0.0.2"
+  }
+}
+```
+
+**Via Git URL**
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.touchscreen": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.touchscreen#touchscreen/v0.0.2"
+  }
+}
+```
+
 ## Requirements
 
 - Unity 6000.3+

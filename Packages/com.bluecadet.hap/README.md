@@ -2,6 +2,41 @@
 
 Unity package for GPU-compressed HAP video playback. Decodes HAP-encoded MOV files to `Texture2D` with zero GC allocations during steady-state playback.
 
+## Installation
+
+**Via openUPM (recommended)**
+
+```sh
+openupm add com.bluecadet.hap
+```
+
+Or add the scoped registry manually to `Packages/manifest.json`:
+
+```json
+{
+  "scopedRegistries": [
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": ["com.bluecadet"]
+    }
+  ],
+  "dependencies": {
+    "com.bluecadet.hap": "0.0.12"
+  }
+}
+```
+
+**Via Git URL**
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.hap": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.hap#hap/v0.0.12"
+  }
+}
+```
+
 Supports HAP (DXT1), HAP Alpha (DXT5), and HAP Q (BC7).
 
 ## Usage

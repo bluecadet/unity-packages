@@ -2,6 +2,41 @@
 
 A performant real-time blur effect for Unity UI using the Kawase dual-filter algorithm.
 
+## Installation
+
+**Via openUPM (recommended)**
+
+```sh
+openupm add com.bluecadet.uiblur
+```
+
+Or add the scoped registry manually to `Packages/manifest.json`:
+
+```json
+{
+  "scopedRegistries": [
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": ["com.bluecadet"]
+    }
+  ],
+  "dependencies": {
+    "com.bluecadet.uiblur": "0.0.4"
+  }
+}
+```
+
+**Via Git URL**
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.uiblur": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.uiblur#uiblur/v0.0.4"
+  }
+}
+```
+
 ## Requirements
 
 - Unity 6000.3+

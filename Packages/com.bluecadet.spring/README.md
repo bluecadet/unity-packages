@@ -2,6 +2,41 @@
 
 Physics-based spring animations and decay/inertia systems for Unity.
 
+## Installation
+
+**Via openUPM (recommended)**
+
+```sh
+openupm add com.bluecadet.spring
+```
+
+Or add the scoped registry manually to `Packages/manifest.json`:
+
+```json
+{
+  "scopedRegistries": [
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": ["com.bluecadet"]
+    }
+  ],
+  "dependencies": {
+    "com.bluecadet.spring": "0.1.0"
+  }
+}
+```
+
+**Via Git URL**
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.spring#spring/v0.1.0"
+  }
+}
+```
+
 ## Requirements
 
 - Unity 6000.3+

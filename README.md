@@ -1,12 +1,64 @@
+## Packages
+
+| Package | Description |
+|---|---|
+| [com.bluecadet.hap](Packages/com.bluecadet.hap) | GPU-compressed HAP video playback |
+| [com.bluecadet.spring](Packages/com.bluecadet.spring) | Physics-based spring animations |
+| [com.bluecadet.touchscreen](Packages/com.bluecadet.touchscreen) | Multi-touch input module for touchscreen installations |
+| [com.bluecadet.uiblur](Packages/com.bluecadet.uiblur) | Kawase blur effect for UI elements (URP) |
+| [com.bluecadet.uiblur-hdrp](Packages/com.bluecadet.uiblur-hdrp) | Kawase blur effect for UI elements (HDRP) |
+| [com.bluecadet.utils](Packages/com.bluecadet.utils) | Utility functions and helpers |
+
 ## Installing a Package
 
-To install a package from this repository, add the following git URL to your Unity project's Package Manager:
+### Via openUPM (recommended)
+
+Install with the [openupm CLI](https://openupm.com/docs/getting-started.html#installing-openupm-cli):
 
 ```sh
-git@github.com:bluecadet/unity-packages.git?path=Packages/[PACKAGE_NAME]#[RELEASE_TAG]
+openupm add com.bluecadet.spring
 ```
 
-Replace `[PACKAGE_NAME]` with the desired package folder name (e.g., `com.bluecadet.spring`) and `[RELEASE_TAG]` with the appropriate version tag (e.g., `spring/v1.2.3`).
+Or add the scoped registry manually to `Packages/manifest.json`:
+
+```json
+{
+  "scopedRegistries": [
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": ["com.bluecadet"]
+    }
+  ],
+  "dependencies": {
+    "com.bluecadet.spring": "0.1.0"
+  }
+}
+```
+
+The scoped registry only needs to be added once per project regardless of how many `com.bluecadet` packages you install.
+
+### Via Git URL
+
+Add the following to `Packages/manifest.json`, replacing `[PACKAGE_NAME]` with the package folder name and `[RELEASE_TAG]` with the version tag:
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/[PACKAGE_NAME]#[RELEASE_TAG]"
+  }
+}
+```
+
+For example, to install `com.bluecadet.spring` at version `0.1.0`:
+
+```json
+{
+  "dependencies": {
+    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.spring#spring/v0.1.0"
+  }
+}
+```
 
 ## Publishing Changes
 
