@@ -65,6 +65,23 @@ jobs:
           tar -tzf "${archive[0]}" | grep -qx 'package/package.json'
           tar -tzf "${archive[0]}" | grep -qx 'package/.attestation.p7m'
 
+      - name: Extract release notes
+        env:
+          PACKAGE_DIR: ${{ steps.tag.outputs.dir }}
+          PACKAGE_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          CHANGELOG="$PACKAGE_DIR/CHANGELOG.md"
+          HEADING="## [$PACKAGE_VERSION]"
+
+          if ! grep -qF "$HEADING" "$CHANGELOG"; then
+            echo "::error::$CHANGELOG does not contain a section for version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+          awk -v heading="$HEADING" \
+            '/^## \[/{if(found) exit; if(index($0,heading)==1) found=1} found' \
+            "$CHANGELOG" > /tmp/release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
