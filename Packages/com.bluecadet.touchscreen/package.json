@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.touchscreen",
-  "version": "0.0.2",
+  "version": "1.0.0",
   "displayName": "Bluecadet Touchscreen",
   "description": "Touchscreen focused input module for Unity's EventSystem.",
   "unity": "6000.3",

@@ -1,0 +1,26 @@
+# Changelog
+
+All notable changes will be documented here.
+
+## [1.0.0] - 2026-05-19
+
+### Changed
+
+- Create utils package
+- Add json validation utils
+- Add support for local settings in settingsmanager
+- Add gui tinting for settings manager
+- Update load from files button cta
+- Refactor settings manager to use generics
+- Better settings manager dirty field tracking
+- Disable settings diff tracking in builds
+- Add shortcut to set up script templates
+- Add singletonRegistry for composition pattern where inheritence isn't viable
+- Add idle timeout utility
+- Use system event in idle timeout
+
+### Fixed
+
+- Fix base settings saving logic
+- Fix generic type bugs on settings manager
+- Fix singleton behavior with no domain reload

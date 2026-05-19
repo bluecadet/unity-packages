@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.spring",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "displayName": "Bluecadet Spring",
   "description": "Spring animation utilities for Unity.",
   "unity": "6000.3",
