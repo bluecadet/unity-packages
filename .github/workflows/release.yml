@@ -1,0 +1,72 @@
+name: Sign and Release
+
+on:
+  push:
+    tags:
+      - "com.bluecadet.*@*"
+
+permissions:
+  contents: write
+
+jobs:
+  sign-and-release:
+    name: Sign and Release
+    runs-on: ubuntu-latest
+    env:
+      UPM_SERVICE_ACCOUNT_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
+      UPM_SERVICE_ACCOUNT_KEY_SECRET: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
+      DIST_DIR: /tmp/upm-dist
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PACKAGE_NAME="${TAG%@*}"
+          PACKAGE_VERSION="${TAG##*@}"
+          PACKAGE_DIR="Packages/${PACKAGE_NAME}"
+
+          if [ ! -d "$PACKAGE_DIR" ]; then
+            echo "::error::Package directory '$PACKAGE_DIR' not found for tag '$TAG'"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r '.version' "$PACKAGE_DIR/package.json")
+          if [ "$MANIFEST_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::Tag version '$PACKAGE_VERSION' does not match package.json version '$MANIFEST_VERSION'"
+            exit 1
+          fi
+
+          echo "name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "dir=$PACKAGE_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Install Unity UPM CLI
+        run: |
+          curl -fsSL https://cdn.packages.unity.com/upm-cli/install.sh -o install.sh
+          bash install.sh
+          echo "$HOME/.upm/bin" >> "$GITHUB_PATH"
+
+      - name: Sign package
+        env:
+          PACKAGE_DIR: ${{ steps.tag.outputs.dir }}
+          UPM_ORG_ID: ${{ secrets.UPM_ORG_ID }}
+        run: |
+          mkdir -p "$DIST_DIR"
+          upm pack "./$PACKAGE_DIR" \
+            --organization-id "$UPM_ORG_ID" \
+            --destination "$DIST_DIR"
+
+      - name: Verify signature
+        run: |
+          archive=("$DIST_DIR"/*.tgz)
+          tar -tzf "${archive[0]}" | grep -qx 'package/package.json'
+          tar -tzf "${archive[0]}" | grep -qx 'package/.attestation.p7m'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "${{ env.DIST_DIR }}/*.tgz"
+          generate_release_notes: true
