@@ -51,6 +51,36 @@ jobs:
           bash install.sh
           echo "$HOME/.upm/bin" >> "$GITHUB_PATH"
 
+      - name: Prepare changelog
+        env:
+          PACKAGE_DIR: ${{ steps.tag.outputs.dir }}
+          PACKAGE_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          CHANGELOG="$PACKAGE_DIR/CHANGELOG.md"
+          HEADING="## [$PACKAGE_VERSION]"
+
+          if ! grep -qF "$HEADING" "$CHANGELOG"; then
+            echo "::error::$CHANGELOG does not contain a section for version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+          # Extract the section for this version (used as GitHub Release body)
+          awk -v heading="$HEADING" \
+            '/^## \[/{if(found) exit; if(index($0,heading)==1) found=1} found' \
+            "$CHANGELOG" > /tmp/release-notes.md
+
+          # Strip markdown syntax for _upm.changelog (plain text, \n-delimited)
+          PLAIN=$(sed \
+            -e 's/^## \[/[/' \
+            -e 's/^### //' \
+            /tmp/release-notes.md \
+            | sed '/^$/{ N; /^\n$/d }')
+
+          # Inject into package.json
+          jq --arg changelog "$PLAIN" '._upm.changelog = $changelog' \
+            "$PACKAGE_DIR/package.json" > /tmp/package.json \
+            && mv /tmp/package.json "$PACKAGE_DIR/package.json"
+
       - name: Sign package
         env:
           PACKAGE_DIR: ${{ steps.tag.outputs.dir }}
@@ -66,23 +96,6 @@ jobs:
           archive=("$DIST_DIR"/*.tgz)
           tar -tzf "${archive[0]}" | grep -qx 'package/package.json'
           tar -tzf "${archive[0]}" | grep -qx 'package/.attestation.p7m'
-
-      - name: Extract release notes
-        env:
-          PACKAGE_DIR: ${{ steps.tag.outputs.dir }}
-          PACKAGE_VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          CHANGELOG="$PACKAGE_DIR/CHANGELOG.md"
-          HEADING="## [$PACKAGE_VERSION]"
-
-          if ! grep -qF "$HEADING" "$CHANGELOG"; then
-            echo "::error::$CHANGELOG does not contain a section for version $PACKAGE_VERSION"
-            exit 1
-          fi
-
-          awk -v heading="$HEADING" \
-            '/^## \[/{if(found) exit; if(index($0,heading)==1) found=1} found' \
-            "$CHANGELOG" > /tmp/release-notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

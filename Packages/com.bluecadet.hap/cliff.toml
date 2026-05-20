@@ -1,8 +1,8 @@
 [changelog]
-header = "# Changelog\n\nAll notable changes will be documented here.\n\n"
+header = "# Changelog\n\nAll notable changes will be documented here.\n"
 body = """
 {% if version -%}
-## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+## [{{ version | split(pat="@") | last }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else -%}
 ## [Unreleased]
 {% endif -%}
@@ -10,10 +10,10 @@ body = """
 ### {{ group | upper_first }}
 {% for commit in commits %}
 - {{ commit.message | split(pat="\n") | first | upper_first | trim }}\
-{% endfor %}
+{% endfor %}\
 {% endfor %}
 """
-trim = true
+trim = false
 
 [git]
 conventional_commits = true
