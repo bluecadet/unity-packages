@@ -124,21 +124,7 @@ namespace Bluecadet.UIBlur.HDRP
 
             const float maxOffset = 2.0f;
 
-            // Find minimum pass count where offset stays within quality range
-            int actualPasses = MAX_PASSES;
-            for (int n = 1; n <= MAX_PASSES; n++)
-            {
-                float neededOffset = blurScale / Mathf.Pow(2f, n);
-                if (neededOffset <= maxOffset)
-                {
-                    actualPasses = n;
-                    break;
-                }
-            }
-
-            // Calculate offset to achieve exact target blur
-            // blur = offset × 2^N  →  offset = blurScale / 2^N
-            float sampleOffset = blurScale / Mathf.Pow(2f, actualPasses);
+            ComputeBlurParams(blurScale, MAX_PASSES, maxOffset, out int actualPasses, out float sampleOffset);
             ctx.cmd.SetGlobalFloat(OffsetId, sampleOffset);
 
             // DOWNSAMPLE: camera -> RT0 -> RT1 -> RT2 ...
@@ -169,6 +155,21 @@ namespace Bluecadet.UIBlur.HDRP
             CoreUtils.DrawFullScreen(ctx.cmd, blurMaterial, PASS_UPSAMPLE);
 
             ctx.cmd.SetGlobalTexture(renderTextureId, finalRT);
+        }
+
+        private static void ComputeBlurParams(float blurScale, int maxPasses, float maxOffset,
+            out int actualPasses, out float sampleOffset)
+        {
+            actualPasses = maxPasses;
+            for (int n = 1; n <= maxPasses; n++)
+            {
+                if (blurScale / Mathf.Pow(2f, n) <= maxOffset)
+                {
+                    actualPasses = n;
+                    break;
+                }
+            }
+            sampleOffset = blurScale / Mathf.Pow(2f, actualPasses);
         }
 
         private void SetSourceTexture(CustomPassContext ctx, RTHandle source)

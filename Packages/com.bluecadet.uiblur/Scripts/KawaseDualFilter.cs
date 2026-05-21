@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using UnityEngine;
 
 namespace Bluecadet.UIBlur
@@ -21,22 +20,22 @@ namespace Bluecadet.UIBlur
       }
     }
 
-    public static void GetResolutionsForScale(int width, int height, float scale, ICollection<Resolution> passes)
+    /// Computes blur pass count and sample offset for a given blur scale.
+    /// Model: effective_blur ≈ sampleOffset × 2^actualPasses
+    /// The minimum pass count N is chosen so that blurScale / 2^N ≤ maxOffset.
+    public static void ComputeBlurParams(float blurScale, int maxPasses, float maxOffset,
+        out int actualPasses, out float sampleOffset)
     {
-      passes.Clear();
-      var currentWidth = (float)width;
-      var currentHeight = (float)height;
-
-      while (scale > 1.0f)
+      actualPasses = maxPasses;
+      for (int n = 1; n <= maxPasses; n++)
       {
-        // Halve the texture size at maximum
-        var currentScale = Mathf.Min(scale, 2.0f);
-        var currentRatio = 1.0f / currentScale;
-        currentWidth *= currentRatio;
-        currentHeight *= currentRatio;
-        passes.Add(new Resolution(currentWidth, currentHeight));
-        scale *= currentRatio;
+        if (blurScale / Mathf.Pow(2f, n) <= maxOffset)
+        {
+          actualPasses = n;
+          break;
+        }
       }
+      sampleOffset = blurScale / Mathf.Pow(2f, actualPasses);
     }
   }
 

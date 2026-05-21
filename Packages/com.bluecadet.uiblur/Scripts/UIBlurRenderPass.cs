@@ -86,21 +86,7 @@ namespace Bluecadet.UIBlur
 
       const float maxOffset = 2.0f;
 
-      // Find minimum pass count where offset stays within quality range
-      int actualPasses = MAX_PASSES;
-      for (int n = 1; n <= MAX_PASSES; n++)
-      {
-        float neededOffset = blurScale / Mathf.Pow(2f, n);
-        if (neededOffset <= maxOffset)
-        {
-          actualPasses = n;
-          break;
-        }
-      }
-
-      // Calculate offset to achieve exact target blur
-      // blur = offset × 2^N  →  offset = blurScale / 2^N
-      float sampleOffset = blurScale / Mathf.Pow(2f, actualPasses);
+      KawaseDualFilter.ComputeBlurParams(blurScale, MAX_PASSES, maxOffset, out int actualPasses, out float sampleOffset);
 
       // Build standard 0.5x resolution chain
       List<KawaseDualFilter.Resolution> resolutions = new List<KawaseDualFilter.Resolution>();
