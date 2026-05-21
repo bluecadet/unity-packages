@@ -69,8 +69,8 @@ namespace Bluecadet.Hap
         /// <summary>Ring buffer passing decoded frames from the decode thread to the main thread.</summary>
         HapFrameRingBuffer _ringBuffer;
 
-        /// <summary>Manages the Texture2D and uploads raw DXT/BC7 data to it.</summary>
-        HapTextureUploader _uploader;
+        /// <summary>One uploader per frame-in-flight slot; cycled by frame count to prevent CPU/GPU races.</summary>
+        HapTextureUploader[] _uploaders;
 
         // ─────────────────────────────────────────────────────────────────────
         // Video metadata (populated on Open)
@@ -195,7 +195,9 @@ namespace Bluecadet.Hap
         /// The current video frame as a correctly-oriented RGBA RenderTexture.
         /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
-        public Texture Texture => _outputRTs != null ? (Texture)_outputRTs[_frontRTIndex] : (Texture)_uploader?.Texture;
+        public Texture Texture => _outputRTs != null
+            ? (Texture)_outputRTs[_frontRTIndex]
+            : (Texture)_uploaders?[UnityEngine.Time.frameCount % _uploaders.Length]?.Texture;
 
         public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
         public bool IsOpen => _handle != IntPtr.Zero;
@@ -491,9 +493,6 @@ namespace Bluecadet.Hap
             // Create ring buffer for passing decoded frames from decode thread to main thread
             _ringBuffer = new HapFrameRingBuffer(_frameBufferSize);
 
-            // Create texture uploader (manages the Texture2D)
-            _uploader = new HapTextureUploader(_width, _height, texFormat);
-
             // Set up the output blit pipeline.
             // All formats need a V-flip to correct Unity's raw DXT orientation
             // (HAP stores top-to-bottom; LoadRawTextureData treats it as bottom-to-top).
@@ -521,6 +520,18 @@ namespace Bluecadet.Hap
                     };
                     _outputRTs[i].Create();
                 }
+
+                // Cycle through one uploader per frame-in-flight slot so CPU upload and
+                // GPU read never race on the same Texture2D across frames.
+                int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
+                _uploaders = new HapTextureUploader[uploaderCount];
+                for (int i = 0; i < uploaderCount; i++)
+                    _uploaders[i] = new HapTextureUploader(_width, _height, texFormat);
+
+                // Initialize both RTs to transparent black so D3D12 never reads
+                // uninitialized memory on the first display frame.
+                for (int i = 0; i < 2; i++)
+                    Graphics.Blit(Texture2D.blackTexture, _outputRTs[i]);
             }
 
             _clock = 0f;
@@ -590,8 +601,11 @@ namespace Bluecadet.Hap
             }
 
             // Dispose managed resources
-            _uploader?.Dispose();
-            _uploader = null;
+            if (_uploaders != null)
+            {
+                foreach (var u in _uploaders) u?.Dispose();
+                _uploaders = null;
+            }
 
             _ringBuffer?.Dispose();
             _ringBuffer = null;
@@ -860,8 +874,12 @@ namespace Bluecadet.Hap
             if (!ringBuffer.TryRead(out int readFrame, out var data)) return false;
             if (readFrame == _lastUploadedFrame) return false;
 
-            // Upload the raw DXT/BC7 data into Unity's texture (CPU memcpy).
-            _uploader.Upload(data);
+            // Select the uploader for this frame. Consecutive frames use different slots so
+            // frame N's CPU write and frame N-1's GPU read target different Texture2D resources.
+            var uploader = _uploaders[UnityEngine.Time.frameCount % _uploaders.Length];
+
+            // Upload the raw DXT/BC7 data into this frame's uploader slot (CPU memcpy).
+            uploader.Upload(data);
 
             // CPU copy is done — release the ring-buffer pin so the decode thread can
             // reuse the slot immediately rather than waiting for the next TryRead call.
@@ -876,7 +894,7 @@ namespace Bluecadet.Hap
             if (_outputRTs != null && _outputMat != null)
             {
                 int backRTIndex = 1 - _frontRTIndex;
-                Graphics.Blit(_uploader.Texture, _outputRTs[backRTIndex], _outputMat);
+                Graphics.Blit(uploader.Texture, _outputRTs[backRTIndex], _outputMat);
             }
 
             _lastUploadedFrame = readFrame;
