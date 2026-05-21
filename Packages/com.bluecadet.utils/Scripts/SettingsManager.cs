@@ -106,19 +106,26 @@ namespace Bluecadet.Utils {
         public void LoadFromFile() {
             try {
                 string basePath = GetBaseFilePath();
-                string baseJson = File.ReadAllText(basePath);
-                JObject baseObj = JObject.Parse(baseJson);
+                if (!File.Exists(basePath)) {
+                    currentSettings = new TSettings();
+#if UNITY_EDITOR
+                    SaveDefaultsToBaseFile();
+#endif
+                } else {
+                    string baseJson = File.ReadAllText(basePath);
+                    JObject baseObj = JObject.Parse(baseJson);
 
-                string localPath = GetLocalFilePath();
-                if (File.Exists(localPath)) {
-                    string localJson = File.ReadAllText(localPath);
-                    JObject localObj = JObject.Parse(localJson);
-                    baseObj.Merge(localObj, new JsonMergeSettings {
-                        MergeArrayHandling = MergeArrayHandling.Replace
-                    });
+                    string localPath = GetLocalFilePath();
+                    if (File.Exists(localPath)) {
+                        string localJson = File.ReadAllText(localPath);
+                        JObject localObj = JObject.Parse(localJson);
+                        baseObj.Merge(localObj, new JsonMergeSettings {
+                            MergeArrayHandling = MergeArrayHandling.Replace
+                        });
+                    }
+
+                    currentSettings = JsonUtility.FromJson<TSettings>(baseObj.ToString());
                 }
-
-                currentSettings = JsonUtility.FromJson<TSettings>(baseObj.ToString());
             } catch (Exception ex) {
                 Debug.LogException(ex);
                 Debug.LogWarning("Unable to load settings. Using defaults.");
