@@ -99,7 +99,12 @@ namespace Bluecadet.Hap
 
             if (_texture != null)
             {
-                UnityEngine.Object.Destroy(_texture);
+#if UNITY_EDITOR
+                if (!UnityEngine.Application.isPlaying)
+                    UnityEngine.Object.DestroyImmediate(_texture);
+                else
+#endif
+                    UnityEngine.Object.Destroy(_texture);
                 _texture = null;
             }
         }
