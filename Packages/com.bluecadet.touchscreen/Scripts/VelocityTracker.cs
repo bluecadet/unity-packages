@@ -13,6 +13,10 @@ namespace Bluecadet.Touchscreen {
         private int currentIndex;
         private int filledCount;
 
+        private T lastTrackedPosition;
+        private float lastTrackedTime;
+        private bool hasLastTrackedPosition;
+
         private readonly System.Func<T, T, T> add;
         private readonly System.Func<T, T, T> subtract;
         private readonly System.Func<T, float, T> scale;
@@ -50,29 +54,22 @@ namespace Bluecadet.Touchscreen {
         /// <param name="position">Current position</param>
         /// <param name="time">Current time (typically Time.time)</param>
         public void Track(T position, float time) {
-            // Get previous sample for velocity calculation
-            int prevIndex = (currentIndex - 1 + sampleCount) % sampleCount;
-
-            if (filledCount > 0) {
-                float deltaTime = time - timestamps[prevIndex];
-                if (deltaTime > 0) {
-                    T prevPosition = samples[prevIndex];
-                    T delta = subtract(position, prevPosition);
-                    T velocity = scale(delta, 1f / deltaTime);
-
-                    // Store velocity in current slot
-                    samples[currentIndex] = velocity;
-                    timestamps[currentIndex] = time;
-                    currentIndex = (currentIndex + 1) % sampleCount;
-                    filledCount = Mathf.Min(filledCount + 1, sampleCount);
-                }
-            } else {
-                // First sample - just store position for next delta calculation
-                samples[currentIndex] = zero;
-                timestamps[currentIndex] = time;
-                currentIndex = (currentIndex + 1) % sampleCount;
-                filledCount = 1;
+            if (!hasLastTrackedPosition) {
+                lastTrackedPosition = position;
+                lastTrackedTime = time;
+                hasLastTrackedPosition = true;
+                return;
             }
+
+            float deltaTime = time - lastTrackedTime;
+            if (deltaTime > 0) {
+                T delta = subtract(position, lastTrackedPosition);
+                T velocity = scale(delta, 1f / deltaTime);
+                TrackVelocity(velocity, time);
+            }
+
+            lastTrackedPosition = position;
+            lastTrackedTime = time;
         }
 
         /// <summary>
@@ -139,6 +136,7 @@ namespace Bluecadet.Touchscreen {
         public void Clear() {
             currentIndex = 0;
             filledCount = 0;
+            hasLastTrackedPosition = false;
             for (int i = 0; i < sampleCount; i++) {
                 samples[i] = zero;
                 timestamps[i] = 0;
