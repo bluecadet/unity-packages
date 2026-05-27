@@ -151,15 +151,15 @@ namespace Bluecadet.Hap
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Double-buffered output RenderTextures. The decode blit writes to the back buffer
-        /// each frame while the scene renderer reads the front buffer (written last frame).
-        /// Swapping front/back after each blit ensures the GPU never reads a texture while
-        /// another GPU command (or a CPU upload) is writing to it — eliminating the D3D12
-        /// read/write hazard that causes screen tearing on Windows.
-        /// Index 0/1 alternate roles each frame; _frontRTIndex tracks which is "front".
+        /// Ring-buffered output RenderTextures (depth = max(2, maxQueuedFrames+1)).
+        /// Each frame writes to slot [frameCount % N] and exposes slot [_displayIndex]
+        /// (the slot written last frame) for scene reading. Because the ring is deeper
+        /// than D3D12's GPU pipeline, the write slot and any GPU-in-flight read slot are
+        /// always different resources, eliminating the D3D12 read/write hazard that
+        /// causes screen tearing on Windows.
         /// </summary>
         RenderTexture[] _outputRTs;
-        int _frontRTIndex;
+        int _displayIndex;
 
         /// <summary>Material used for the output blit. Shader varies by format.</summary>
         Material _outputMat;
@@ -196,7 +196,7 @@ namespace Bluecadet.Hap
         /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
         public Texture Texture => _outputRTs != null
-            ? (Texture)_outputRTs[_frontRTIndex]
+            ? (Texture)_outputRTs[_displayIndex]
             : (Texture)_uploaders?[UnityEngine.Time.frameCount % _uploaders.Length]?.Texture;
 
         public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
@@ -380,10 +380,10 @@ namespace Bluecadet.Hap
                     break;
             }
 
-            // Promote the back buffer to front AFTER rendering so next frame's
-            // scene draw reads the frame we just wrote rather than a frame mid-blit.
+            // Advance the display index to the slot we just wrote, AFTER the scene has
+            // rendered from the previous slot. Next frame's scene draw reads this slot.
             if (uploadedNewFrame && _outputRTs != null)
-                _frontRTIndex = 1 - _frontRTIndex;
+                _displayIndex = UnityEngine.Time.frameCount % _outputRTs.Length;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -507,10 +507,15 @@ namespace Bluecadet.Hap
             }
             else
             {
+                // Ring depth must exceed D3D12's GPU pipeline depth (maxQueuedFrames) so the
+                // write slot and any GPU-in-flight read slot are always different resources.
+                // Use the same count for both uploaders and output RTs.
+                int ringDepth = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
+
                 _outputMat = new Material(outputShader) { hideFlags = HideFlags.HideAndDontSave };
-                _outputRTs = new RenderTexture[2];
-                _frontRTIndex = 0;
-                for (int i = 0; i < 2; i++)
+                _outputRTs = new RenderTexture[ringDepth];
+                _displayIndex = 0;
+                for (int i = 0; i < ringDepth; i++)
                 {
                     _outputRTs[i] = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
                     {
@@ -521,16 +526,13 @@ namespace Bluecadet.Hap
                     _outputRTs[i].Create();
                 }
 
-                // Cycle through one uploader per frame-in-flight slot so CPU upload and
-                // GPU read never race on the same Texture2D across frames.
-                int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
-                _uploaders = new HapTextureUploader[uploaderCount];
-                for (int i = 0; i < uploaderCount; i++)
+                _uploaders = new HapTextureUploader[ringDepth];
+                for (int i = 0; i < ringDepth; i++)
                     _uploaders[i] = new HapTextureUploader(_width, _height, texFormat);
 
-                // Initialize both RTs to transparent black so D3D12 never reads
-                // uninitialized memory on the first display frame.
-                for (int i = 0; i < 2; i++)
+                // Initialize all RT slots to opaque black so D3D12 never reads
+                // uninitialized memory before the first video frame arrives.
+                for (int i = 0; i < ringDepth; i++)
                     Graphics.Blit(Texture2D.blackTexture, _outputRTs[i]);
             }
 
@@ -885,16 +887,13 @@ namespace Bluecadet.Hap
             // reuse the slot immediately rather than waiting for the next TryRead call.
             ringBuffer.ClearPin();
 
-            // Blit through the output shader (flip + optional YCoCg decode) into the back buffer.
-            // The caller promotes back→front AFTER the scene has rendered from the current front
-            // buffer, so the two RTs are always different resources during any given frame.
-            // Note: this means RenderTexture mode's output is always one frame behind the blit
-            // — the D3D12 hazard prevention requires it. The alternative (swap before render)
-            // would read and write the same RT in the same command list.
+            // Blit through the output shader (flip + optional YCoCg decode) into the write slot.
+            // The caller advances _displayIndex AFTER the scene has rendered from the previous slot,
+            // so the write slot and the display slot are always different resources this frame.
             if (_outputRTs != null && _outputMat != null)
             {
-                int backRTIndex = 1 - _frontRTIndex;
-                Graphics.Blit(uploader.Texture, _outputRTs[backRTIndex], _outputMat);
+                int writeIndex = UnityEngine.Time.frameCount % _outputRTs.Length;
+                Graphics.Blit(uploader.Texture, _outputRTs[writeIndex], _outputMat);
             }
 
             _lastUploadedFrame = readFrame;
