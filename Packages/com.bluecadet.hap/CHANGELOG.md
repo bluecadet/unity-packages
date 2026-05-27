@@ -2,6 +2,12 @@
 
 All notable changes will be documented here.
 
+## [1.0.2] - 2026-05-27
+
+### Fixed
+
+- Cycle uploaders per frame-in-flight to fix D3D12 tearing
+
 ## [1.0.1] - 2026-05-20
 
 ### Fixed
