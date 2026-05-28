@@ -489,7 +489,7 @@ namespace Bluecadet.Hap
 
             _width = HapNative.hap_get_width(_handle);
             _height = HapNative.hap_get_height(_handle);
-            int texFormat = HapNative.hap_get_texture_format(_handle);
+            var format = HapFormatExtensions.ToHapFormat(HapNative.hap_get_texture_format(_handle));
 
             // Create ring buffer for passing decoded frames from decode thread to main thread
             _ringBuffer = new HapFrameRingBuffer(_frameBufferSize);
@@ -498,9 +498,7 @@ namespace Bluecadet.Hap
             // All formats need a V-flip to correct Unity's raw DXT orientation
             // (HAP stores top-to-bottom; LoadRawTextureData treats it as bottom-to-top).
             // HAP Q additionally needs YCoCg→RGB color space conversion.
-            string shaderName = texFormat == HapNative.TexFormatYCoCgDXT5
-                ? "HapYCoCgDecode"
-                : "HapFlip";
+            string shaderName = format.ShaderName();
             var outputShader = Resources.Load<Shader>(shaderName);
             if (outputShader == null)
             {
@@ -529,7 +527,7 @@ namespace Bluecadet.Hap
                 int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
                 _uploaders = new HapTextureUploader[uploaderCount];
                 for (int i = 0; i < uploaderCount; i++)
-                    _uploaders[i] = new HapTextureUploader(_width, _height, texFormat);
+                    _uploaders[i] = new HapTextureUploader(_width, _height, format);
 
                 // Initialize both RT slots to opaque black so D3D12 never reads
                 // uninitialized memory before the first video frame arrives.

@@ -13,7 +13,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_DXT1_CreatesNonNullTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.DXT1);
             Assert.That(uploader.Texture, Is.Not.Null);
             uploader.Dispose();
         }
@@ -21,7 +21,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_DXT5_CreatesNonNullTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatDXT5);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.DXT5);
             Assert.That(uploader.Texture, Is.Not.Null);
             uploader.Dispose();
         }
@@ -29,7 +29,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_BC7_CreatesNonNullTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatBC7);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.BC7);
             Assert.That(uploader.Texture, Is.Not.Null);
             uploader.Dispose();
         }
@@ -37,7 +37,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_YCoCgDXT5_CreatesNonNullTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatYCoCgDXT5);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.YCoCgDXT5);
             Assert.That(uploader.Texture, Is.Not.Null);
             uploader.Dispose();
         }
@@ -45,7 +45,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_UnknownFormat_FallsBackAndCreatesTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, -1);
+            var uploader = new HapTextureUploader(64, 64, (HapFormat)(-1));
             Assert.That(uploader.Texture, Is.Not.Null);
             uploader.Dispose();
         }
@@ -53,7 +53,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Constructor_SetsCorrectDimensions()
         {
-            var uploader = new HapTextureUploader(128, 256, HapNative.TexFormatDXT1);
+            var uploader = new HapTextureUploader(128, 256, HapFormat.DXT1);
             Assert.That(uploader.Texture.width,  Is.EqualTo(128));
             Assert.That(uploader.Texture.height, Is.EqualTo(256));
             uploader.Dispose();
@@ -70,7 +70,7 @@ namespace Bluecadet.Hap.Tests
             const int count = 3; // matches default uploaderCount (maxQueuedFrames=2 → 3)
             var uploaders = new HapTextureUploader[count];
             for (int i = 0; i < count; i++)
-                uploaders[i] = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+                uploaders[i] = new HapTextureUploader(64, 64, HapFormat.DXT1);
 
             foreach (var u in uploaders)
                 Assert.That(u.Texture, Is.Not.Null);
@@ -85,7 +85,7 @@ namespace Bluecadet.Hap.Tests
             const int count = 3;
             var uploaders = new HapTextureUploader[count];
             for (int i = 0; i < count; i++)
-                uploaders[i] = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+                uploaders[i] = new HapTextureUploader(64, 64, HapFormat.DXT1);
 
             for (int i = 0; i < count; i++)
                 for (int j = i + 1; j < count; j++)
@@ -104,14 +104,14 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Dispose_CalledOnce_DoesNotThrow()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.DXT1);
             Assert.DoesNotThrow(() => uploader.Dispose());
         }
 
         [Test]
         public void Dispose_CalledTwice_DoesNotThrow()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.DXT1);
             uploader.Dispose();
             Assert.DoesNotThrow(() => uploader.Dispose());
         }
@@ -119,7 +119,7 @@ namespace Bluecadet.Hap.Tests
         [Test]
         public void Dispose_NullsTexture()
         {
-            var uploader = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+            var uploader = new HapTextureUploader(64, 64, HapFormat.DXT1);
             uploader.Dispose();
             Assert.That(uploader.Texture, Is.Null);
         }
@@ -130,7 +130,7 @@ namespace Bluecadet.Hap.Tests
             const int count = 3;
             var uploaders = new HapTextureUploader[count];
             for (int i = 0; i < count; i++)
-                uploaders[i] = new HapTextureUploader(64, 64, HapNative.TexFormatDXT1);
+                uploaders[i] = new HapTextureUploader(64, 64, HapFormat.DXT1);
 
             Assert.DoesNotThrow(() =>
             {
