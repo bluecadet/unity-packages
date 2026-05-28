@@ -34,15 +34,18 @@ namespace Bluecadet.Hap
     /// MonoBehaviour that plays HAP-encoded video files.
     ///
     /// Architecture overview:
-    /// - A background thread (DecodeLoop) reads compressed frames from disk and decompresses them
-    ///   into GPU-ready DXT/BC7 texture data using a native C plugin.
+    /// - A background thread (HapOpen) calls hap_open() and reads file metadata, then signals
+    ///   the main thread to create GPU resources and start the decode thread. This keeps the
+    ///   expensive file-map + frame-offset pre-cache + first-frame probe off the main thread.
+    /// - A background thread (HapDecode) reads compressed frames from disk and decompresses
+    ///   them into GPU-ready DXT/BC7 texture data using a native C plugin.
     /// - The main thread uploads the decompressed data to a Texture2D each frame.
     /// - A ring buffer passes decoded frames from the background thread to the main thread
     ///   without allocations or locks during steady-state playback.
-    ///
-    /// This design keeps expensive I/O and decompression off the main thread while still
-    /// allowing the GPU texture upload (which must happen on the main thread) to occur
-    /// without stalling on disk reads.
+    /// - On disable, GPU resources are disposed immediately (they don't depend on the native
+    ///   handle), and a short-lived background thread (HapClose) waits for the decode thread
+    ///   to exit before freeing the ring buffer and calling hap_close(). This prevents the
+    ///   decode-thread wait from blocking the main thread.
     /// </summary>
     public class HapPlayer : MonoBehaviour
     {
@@ -73,7 +76,7 @@ namespace Bluecadet.Hap
         HapOutputPipeline _outputPipeline;
 
         // ─────────────────────────────────────────────────────────────────────
-        // Video metadata (populated on Open)
+        // Video metadata (populated on CompleteOpen)
         // ─────────────────────────────────────────────────────────────────────
 
         int _frameCount;
@@ -95,11 +98,51 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Unity frame count when the video was last opened. We skip GPU uploads in the same frame
-        /// as Open() because D3D12 requires at least one command-list flush between RenderTexture.Create()
-        /// and the first Graphics.Blit that targets it — otherwise the GPU encounters an uninitialized
-        /// render target in the same command buffer and removes the device.
+        /// as CompleteOpen() because D3D12 requires at least one command-list flush between
+        /// RenderTexture.Create() and the first Graphics.Blit that targets it.
         /// </summary>
         int _openedFrame = -1;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Async open state
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Background thread that calls hap_open() and reads file metadata.
+        /// Set in BeginOpen(), cleared on the main thread in Update() after the result is consumed.
+        /// Only touched on the main thread except during its own execution.
+        /// </summary>
+        Thread _openThread;
+
+        /// <summary>
+        /// Set to true by the main thread to tell the open background thread to discard its result.
+        /// The thread checks this after hap_open() returns; if set, it closes the handle and exits.
+        /// </summary>
+        volatile bool _openCancelled;
+
+        /// <summary>
+        /// Written by the open background thread when hap_open() and metadata reads are complete.
+        /// The main thread polls this in Update() and calls CompleteOpen() when non-null.
+        /// Null handle signals failure; non-null signals success.
+        /// </summary>
+        volatile OpenResult _openResult;
+
+        /// <summary>
+        /// True if Play() was called (or playOnEnable was set) while an open was in progress.
+        /// Consumed by CompleteOpen() on the main thread.
+        /// </summary>
+        bool _pendingPlay;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Deferred close state
+        // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Background thread that waits for the decode thread to exit, then frees the ring buffer
+        /// and calls hap_close(). Avoids blocking the main thread on decode-thread teardown.
+        /// Joined in BeginOpen() (before starting a new open) and in OnDestroy().
+        /// </summary>
+        Thread _closeThread;
 
         // ─────────────────────────────────────────────────────────────────────
         // Background decode thread coordination
@@ -113,7 +156,7 @@ namespace Bluecadet.Hap
         /// <summary>
         /// Set to false just before hap_close() is called so the decode thread
         /// can detect a closing handle and abort rather than crash into freed memory.
-        /// Written by the main thread after _decodeExited signals; read by the
+        /// Written by the close background thread after _decodeExited signals; read by the
         /// decode thread as a belt-and-suspenders guard.
         /// </summary>
         volatile bool _handleValid;
@@ -128,10 +171,10 @@ namespace Bluecadet.Hap
         volatile int _decodeDirection = 1;
 
         /// <summary>Lock for coordinating between main thread and decode thread.</summary>
-        readonly object _decodeLock = new object();
+        readonly object _decodeLock = new();
 
-        /// <summary>Signaled when the decode thread exits, so Close() can wait for cleanup.</summary>
-        readonly ManualResetEventSlim _decodeExited = new ManualResetEventSlim(true);
+        /// <summary>Signaled when the decode thread exits, so the close background thread can proceed.</summary>
+        readonly ManualResetEventSlim _decodeExited = new(true);
 
         // ─────────────────────────────────────────────────────────────────────
         // Rendering helpers
@@ -150,15 +193,21 @@ namespace Bluecadet.Hap
         /// <summary>Speed values whose absolute value is below this are treated as zero (paused).</summary>
         const float k_PlaybackSpeedEpsilon = 1e-5f;
 
-        static readonly ProfilerMarker s_UpdateMarker     = new ProfilerMarker("HapPlayer.Update");
-        static readonly ProfilerMarker s_UploadMarker     = new ProfilerMarker("HapPlayer.UploadFrame");
-        static readonly ProfilerMarker s_RenderMarker     = new ProfilerMarker("HapPlayer.Render");
-        static readonly ProfilerMarker s_ReadSampleMarker = new ProfilerMarker("HapPlayer.ReadSample"); // I/O / page-fault time
-        static readonly ProfilerMarker s_DecompressMarker = new ProfilerMarker("HapPlayer.Decompress");  // Snappy CPU time
+        static readonly ProfilerMarker s_UpdateMarker     = new("HapPlayer.Update");
+        static readonly ProfilerMarker s_UploadMarker     = new("HapPlayer.UploadFrame");
+        static readonly ProfilerMarker s_RenderMarker     = new("HapPlayer.Render");
+        static readonly ProfilerMarker s_ReadSampleMarker = new("HapPlayer.ReadSample"); // I/O / page-fault time
+        static readonly ProfilerMarker s_DecompressMarker = new("HapPlayer.Decompress");  // Snappy CPU time
 
         // ─────────────────────────────────────────────────────────────────────
         // Events
         // ─────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Raised once on the main thread when the video finishes opening and is ready to play.
+        /// Not raised if opening fails or is cancelled.
+        /// </summary>
+        public event Action Opened;
 
         /// <summary>Raised when playback reaches the end and Loop is false.</summary>
         public event Action PlaybackCompleted;
@@ -174,15 +223,27 @@ namespace Bluecadet.Hap
         /// The current video frame as a correctly-oriented RGBA RenderTexture.
         /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
-        public Texture Texture => (Texture)_outputPipeline?.DisplayTexture ?? (Texture)_outputPipeline?.RawTexture;
+        public Texture Texture
+        {
+            get
+            {
+                if (_outputPipeline == null) return null;
+                Texture t = _outputPipeline.DisplayTexture;
+                return t != null ? t : _outputPipeline.RawTexture;
+            }
+        }
 
         public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
-        public bool IsOpen => _handle != IntPtr.Zero;
-        public int FrameCount => _frameCount;
-        public float Duration => _duration;
+        public bool IsOpen    => _handle != IntPtr.Zero;
+
+        /// <summary>True while the background open thread is running (hap_open not yet complete).</summary>
+        public bool IsOpening => _openThread != null;
+
+        public int FrameCount  => _frameCount;
+        public float Duration  => _duration;
         public float FrameRate => _frameRate;
-        public int Width => _width;
-        public int Height => _height;
+        public int Width       => _width;
+        public int Height      => _height;
         public string FilePath => filePath;
 
         public bool Loop
@@ -246,33 +307,58 @@ namespace Bluecadet.Hap
 
         void OnEnable()
         {
-            Open();
-            if (playOnEnable && IsOpen)
-                Play();
+            _pendingPlay = playOnEnable;
+            BeginOpen();
         }
 
         void OnDisable()
         {
+            _openCancelled = true;
             Close();
         }
 
         void OnDestroy()
         {
+            _openCancelled = true;
             Close();
+            // Block here — OnDestroy can afford to wait, and we must not dispose
+            // _decodeExited while the close thread is still waiting on it.
+            _openThread?.Join();
+            _openThread = null;
+            // Drain any result the open thread left behind so the handle isn't leaked.
+            var leftover = _openResult;
+            _openResult = null;
+            if (leftover != null && leftover.Handle != IntPtr.Zero)
+                HapNative.hap_close(leftover.Handle);
+            _closeThread?.Join();
             _decodeExited.Dispose();
         }
 
         /// <summary>
-        /// Main update loop: advance clock, request decode, upload frame, render.
+        /// Main update loop: consume pending open result, advance clock, request decode,
+        /// upload frame, render.
         /// </summary>
         void Update()
         {
+            // Consume async open result produced by the background open thread.
+            if (_openResult is { } result)
+            {
+                _openResult = null;
+                _openThread = null;
+                if (!_openCancelled && result.Handle != IntPtr.Zero)
+                    CompleteOpen(result);
+                else
+                {
+                    _pendingPlay = false;
+                    if (result.Handle != IntPtr.Zero)
+                        HapNative.hap_close(result.Handle);
+                }
+            }
+
             if (!IsOpen) return;
 
             using (s_UpdateMarker.Auto())
-            {
                 UpdatePlayback();
-            }
         }
 
         void UpdatePlayback()
@@ -326,9 +412,7 @@ namespace Bluecadet.Hap
             // Upload the latest decoded frame to the back buffer (does NOT swap yet).
             bool uploadedNewFrame;
             using (s_UploadMarker.Auto())
-            {
                 uploadedNewFrame = UploadFrame();
-            }
 
             // Apply the texture to the output target based on render mode.
             // Reads from the FRONT buffer, which was written last frame — this
@@ -341,7 +425,7 @@ namespace Bluecadet.Hap
                     var tex = Texture;
                     if (targetRenderer != null && tex != null)
                     {
-                        if (_mpb == null) _mpb = new MaterialPropertyBlock();
+                        _mpb ??= new MaterialPropertyBlock();
                         targetRenderer.GetPropertyBlock(_mpb);
                         _mpb.SetTexture(MainTexId, tex);
                         targetRenderer.SetPropertyBlock(_mpb);
@@ -353,7 +437,6 @@ namespace Bluecadet.Hap
                         Graphics.Blit(srcTex, targetRenderTexture);
                     break;
                 case HapRenderMode.APIOnly:
-                    // User reads Texture property directly
                     break;
             }
 
@@ -367,6 +450,12 @@ namespace Bluecadet.Hap
 
         public void Play()
         {
+            if (_openThread != null)
+            {
+                // Open in progress — defer play until CompleteOpen() runs.
+                _pendingPlay = true;
+                return;
+            }
             if (!IsOpen) return;
             // When starting reverse playback from position 0, jump to the end so the first
             // Update doesn't immediately hit the start-of-video boundary.
@@ -381,12 +470,14 @@ namespace Bluecadet.Hap
 
         public void Pause()
         {
+            _pendingPlay = false;
             _playing = false;
         }
 
         /// <summary>Stop playback and reset to frame 0, regardless of playback direction.</summary>
         public void Stop()
         {
+            _pendingPlay = false;
             _playing = false;
             _clock = 0f;
             if (IsOpen && _frameCount > 0)
@@ -396,14 +487,10 @@ namespace Bluecadet.Hap
         /// <summary>Close current file (if any) and open a new one.</summary>
         public void Open(string path)
         {
-            string prevPath = filePath;
+            _openCancelled = true;
             Close();
             filePath = path;
-            Open();
-            // If open failed, restore the previous path so a future OnEnable retries the
-            // last known-good file rather than permanently recording an invalid one.
-            if (!IsOpen)
-                filePath = prevPath;
+            BeginOpen();
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -421,60 +508,108 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
-        /// Open the video file, initialize native handle, ring buffer, texture, and start decode thread.
+        /// Start the background open thread. The thread calls hap_open(), reads file metadata,
+        /// and stores an OpenResult. Update() picks it up on the main thread and calls CompleteOpen().
         /// </summary>
-        void Open()
+        void BeginOpen()
         {
             if (string.IsNullOrEmpty(filePath)) return;
-            // Guard against double-open (e.g. OnEnable called unexpectedly while already playing).
-            // Without this, a second call would overwrite _handle and start a second decode thread
-            // while the first one keeps running, leaking both the old handle and thread.
-            if (IsOpen)
+
+            // If an open is already in progress (rapid enable/disable/enable, or Open(path) called
+            // mid-open), wait for it to finish and discard any result before starting a fresh open.
+            if (_openThread != null)
             {
-                Debug.LogWarning($"[HapPlayer] Open() called while already open ('{filePath}'). Call Close() first.");
-                return;
+                _openThread.Join();
+                _openThread = null;
+                var stale = _openResult;
+                _openResult = null;
+                if (stale != null && stale.Handle != IntPtr.Zero)
+                    HapNative.hap_close(stale.Handle);
             }
+
+            if (IsOpen) return;
+
+            // Ensure the previous deferred close has fully finished before reusing _decodeExited
+            // and starting a new decode thread. In practice the close thread exits within a frame
+            // since the decode thread responds immediately to _decodeRunning = false.
+            _closeThread?.Join();
+            _closeThread = null;
 
             string resolved = ResolvePath(filePath);
+            _openCancelled = false;
+            _openResult = null;
 
-            // Open the native demuxer/decoder
+            _openThread = new Thread(() => OpenBackground(resolved))
+            {
+                IsBackground = true,
+                Name = "HapOpen"
+            };
+            _openThread.Start();
+        }
+
+        /// <summary>
+        /// Background thread body: calls hap_open() (expensive: file mapping, frame-offset
+        /// pre-cache, first-frame decode probe) then reads cheap metadata. Stores the result
+        /// for the main thread to consume in Update().
+        /// </summary>
+        void OpenBackground(string resolved)
+        {
             int err;
-            _handle = HapNative.hap_open(resolved, out err);
-            if (_handle == IntPtr.Zero)
+            IntPtr handle = HapNative.hap_open(resolved, out err);
+
+            if (handle == IntPtr.Zero)
             {
-                Debug.LogError($"[HapPlayer] Failed to open '{resolved}', error: {err}");
+                if (!_openCancelled)
+                    Debug.LogError($"[HapPlayer] Failed to open '{resolved}', error: {err}");
+                _openResult = OpenResult.Failed;
                 return;
             }
 
-            // Read video metadata
-            _frameCount = HapNative.hap_get_frame_count(_handle);
-            _frameRate = HapNative.hap_get_frame_rate(_handle);
+            int frameCount = HapNative.hap_get_frame_count(handle);
+            float frameRate = HapNative.hap_get_frame_rate(handle);
 
-            if (_frameRate <= 0f || _frameCount <= 0)
+            if (frameRate <= 0f || frameCount <= 0)
             {
-                Debug.LogError($"[HapPlayer] Invalid video ({_frameCount} frames, {_frameRate} fps) in '{resolved}'");
-                HapNative.hap_close(_handle);
-                _handle = IntPtr.Zero;
+                if (!_openCancelled)
+                    Debug.LogError($"[HapPlayer] Invalid video ({frameCount} frames, {frameRate} fps) in '{resolved}'");
+                HapNative.hap_close(handle);
+                _openResult = OpenResult.Failed;
                 return;
             }
 
-            _duration = _frameCount / _frameRate;
-            _frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
+            _openResult = new OpenResult(
+                handle,
+                frameCount,
+                frameRate,
+                HapNative.hap_get_frame_buffer_size(handle),
+                HapNative.hap_get_width(handle),
+                HapNative.hap_get_height(handle),
+                HapFormatExtensions.ToHapFormat(HapNative.hap_get_texture_format(handle))
+            );
+        }
 
-            _width = HapNative.hap_get_width(_handle);
-            _height = HapNative.hap_get_height(_handle);
-            var format = HapFormatExtensions.ToHapFormat(HapNative.hap_get_texture_format(_handle));
+        /// <summary>
+        /// Called on the main thread from Update() once the background open thread completes.
+        /// Creates GPU resources, starts the decode thread, and triggers playback if requested.
+        /// </summary>
+        void CompleteOpen(OpenResult result)
+        {
+            _handle          = result.Handle;
+            _frameCount      = result.FrameCount;
+            _frameRate       = result.FrameRate;
+            _frameBufferSize = result.FrameBufferSize;
+            _width           = result.Width;
+            _height          = result.Height;
+            _duration        = _frameCount / _frameRate;
 
-            // Create ring buffer for passing decoded frames from decode thread to main thread
             _ringBuffer = new HapFrameRingBuffer(_frameBufferSize);
 
             int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
-            _outputPipeline = new HapOutputPipeline(_width, _height, format, uploaderCount);
+            _outputPipeline = new HapOutputPipeline(_width, _height, result.Format, uploaderCount);
 
             _clock = 0f;
             _openedFrame = UnityEngine.Time.frameCount;
 
-            // Start background decode thread
             _handleValid = true;
             _decodeExited.Reset();
             _decodeRunning = true;
@@ -493,8 +628,6 @@ namespace Bluecadet.Hap
             catch (Exception ex)
             {
                 // Thread creation failed (OS resource exhaustion or invalid state).
-                // Reset all decode state so Close() doesn't hang indefinitely waiting
-                // on _decodeExited, which the thread would never Set.
                 Debug.LogError($"[HapPlayer] Failed to start decode thread: {ex.Message}");
                 _decodeThread = null;
                 _decodeRunning = false;
@@ -505,58 +638,81 @@ namespace Bluecadet.Hap
                 return;
             }
 
-            // Request the first frame
             if (_frameCount > 0)
                 RequestDecode(0);
+
+            Opened?.Invoke();
+
+            if (_pendingPlay)
+            {
+                _pendingPlay = false;
+                Play();
+            }
         }
 
         /// <summary>
-        /// Stop playback, shut down decode thread, and release all resources.
+        /// Immediately clears all instance state and disposes GPU resources (which are safe to
+        /// release without waiting for the decode thread). Starts a background thread (HapClose)
+        /// that waits for the decode thread to exit, then frees the ring buffer and calls
+        /// hap_close() — avoiding any main-thread stall on decode-thread teardown.
         /// </summary>
         void Close()
         {
             _playing = false;
 
-            // Signal decode thread to exit and wake it up
+            if (!IsOpen && _decodeThread == null)
+            {
+                _frameCount = 0;
+                _frameRate  = 0;
+                _duration   = 0;
+                return;
+            }
+
+            // Signal decode thread to exit and wake it up.
             _decodeRunning = false;
             lock (_decodeLock)
                 Monitor.Pulse(_decodeLock);
 
-            // Wait for the decode thread to finish its current frame and exit cleanly before
-            // freeing any resources it may be using. No timeout is used because proceeding
-            // early risks a use-after-free inside hap_decode_frame on the native side.
-            //
-            // Trade-off: if the underlying file I/O stalls (e.g. a stuck network mount or
-            // an OS-suspended disk during application quit), this call can hang indefinitely.
-            // In practice hap_decode_frame is bounded by the OS's own I/O timeout, but be
-            // aware of this when closing players that are reading from unreliable storage.
-            if (_decodeThread != null)
-            {
-                _decodeExited.Wait();
-                _decodeThread = null;
-            }
+            // Capture resources before clearing instance state, so the close background
+            // thread holds valid references while the main thread sees a clean slate.
+            var pipeline    = _outputPipeline;
+            var ringBuffer  = _ringBuffer;
+            var handle      = _handle;
+            var decodeThread = _decodeThread;
 
-            // Dispose managed resources
-            _outputPipeline?.Dispose();
             _outputPipeline = null;
+            _ringBuffer     = null;
+            _handle         = IntPtr.Zero;
+            _handleValid    = false;
+            _decodeThread   = null;
+            _frameCount     = 0;
+            _frameRate      = 0;
+            _duration       = 0;
 
-            _ringBuffer?.Dispose();
-            _ringBuffer = null;
+            // GPU resources are written exclusively by the main thread and are independent
+            // of the native handle — dispose them now while still on the main thread.
+            pipeline?.Dispose();
 
-            // Close native handle.  Mark invalid before the call so the decode
-            // thread (if it somehow missed _decodeRunning = false) can detect
-            // the handle is gone and abort rather than crash into freed memory.
-            _handleValid = false;
-            if (_handle != IntPtr.Zero)
+            // Ring buffer and native handle must outlive the decode thread. Wait for it
+            // off the main thread to avoid blocking the frame.
+            _closeThread = new Thread(() =>
             {
-                HapNative.hap_close(_handle);
-                _handle = IntPtr.Zero;
-            }
+                if (decodeThread != null)
+                    _decodeExited.Wait();
 
-            // Reset state
-            _frameCount = 0;
-            _frameRate = 0;
-            _duration = 0;
+                ringBuffer?.Dispose();
+
+                // Mark invalid before hap_close so a lingering decode thread (extremely
+                // unlikely given the Wait above) can detect the handle is gone.
+                _handleValid = false;
+                if (handle != IntPtr.Zero)
+                    HapNative.hap_close(handle);
+            })
+            {
+                IsBackground = true,
+                Name = "HapClose"
+            };
+            _closeThread.Start();
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -697,7 +853,7 @@ namespace Bluecadet.Hap
             }
             finally
             {
-                // Signal that we've exited so Close() can proceed safely
+                // Signal that we've exited so the close background thread can proceed safely.
                 _decodeExited.Set();
             }
         }
@@ -716,13 +872,42 @@ namespace Bluecadet.Hap
             var ringBuffer = _ringBuffer;
             if (ringBuffer == null || _outputPipeline == null) return false;
 
-            // Skip GPU uploads in the same frame that Open() ran. D3D12 requires at least one
-            // command-list flush between RenderTexture.Create() and the first blit that targets it.
+            // Skip GPU uploads in the same frame that CompleteOpen() ran. D3D12 requires at least
+            // one command-list flush between RenderTexture.Create() and the first blit that targets it.
             if (UnityEngine.Time.frameCount == _openedFrame) return false;
 
             if (!ringBuffer.TryAcquire(out var lease)) return false;
             using (lease)
                 return _outputPipeline.Upload(lease.Data, lease.FrameIndex);
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Open result (transferred from open background thread to main thread)
+        // ─────────────────────────────────────────────────────────────────────
+
+        sealed class OpenResult
+        {
+            public static readonly OpenResult Failed = new(IntPtr.Zero, 0, 0f, 0, 0, 0, default);
+
+            public readonly IntPtr Handle;
+            public readonly int FrameCount;
+            public readonly float FrameRate;
+            public readonly int FrameBufferSize;
+            public readonly int Width;
+            public readonly int Height;
+            public readonly HapFormat Format;
+
+            public OpenResult(IntPtr handle, int frameCount, float frameRate,
+                              int frameBufferSize, int width, int height, HapFormat format)
+            {
+                Handle          = handle;
+                FrameCount      = frameCount;
+                FrameRate       = frameRate;
+                FrameBufferSize = frameBufferSize;
+                Width           = width;
+                Height          = height;
+                Format          = format;
+            }
         }
     }
 }

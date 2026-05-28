@@ -56,6 +56,13 @@ namespace Bluecadet.Hap.Editor
 
             var player = (HapPlayer)target;
 
+            if (Application.isPlaying && player.IsOpening)
+            {
+                EditorGUILayout.Space();
+                EditorGUILayout.HelpBox("Opening…", MessageType.Info);
+                Repaint();
+            }
+
             if (Application.isPlaying && player.IsOpen)
             {
                 EditorGUILayout.Space();
