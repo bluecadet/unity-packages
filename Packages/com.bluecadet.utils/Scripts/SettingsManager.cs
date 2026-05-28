@@ -47,6 +47,26 @@ namespace Bluecadet.Utils {
         public virtual string GetLocalFilePath() {
             return Path.Combine(GetBaseDirectory(), "settings.local.json");
         }
+
+        /// Returns the instance ID used to name the per-machine settings file.
+        /// Checks for a --machineId CLI arg first; falls back to the OS hostname.
+        public virtual string GetInstanceId() {
+            var cli = CommandLineArgs.Get();
+            if (cli != null && cli.TryGetArg("--machineId", out string machineId)) {
+                return machineId;
+            }
+            return System.Environment.MachineName;
+        }
+
+        /// Returns the path to the per-machine settings file (e.g. settings.HOSTNAME.json).
+        /// Derived from GetBaseFilePath() by inserting the instance ID before the extension.
+        public virtual string GetInstanceFilePath() {
+            string basePath = GetBaseFilePath();
+            string dir = Path.GetDirectoryName(basePath);
+            string name = Path.GetFileNameWithoutExtension(basePath);
+            string ext = Path.GetExtension(basePath);
+            return Path.Combine(dir, $"{name}.{GetInstanceId()}{ext}");
+        }
     }
 
     [ExecuteInEditMode]
@@ -91,7 +111,7 @@ namespace Bluecadet.Utils {
             LoadFromFile();
         }
 
-        /// Loads settings from the base file, then merges any local overrides on top.
+        /// Loads settings by merging: base -> instance -> local (each layer overrides the previous).
         public void LoadFromFile() {
             try {
                 string basePath = GetBaseFilePath();
@@ -101,19 +121,23 @@ namespace Bluecadet.Utils {
                     SaveDefaultsToBaseFile();
 #endif
                 } else {
-                    string baseJson = File.ReadAllText(basePath);
-                    JObject baseObj = JObject.Parse(baseJson);
+                    JObject merged = JObject.Parse(File.ReadAllText(basePath));
 
-                    string localPath = GetLocalFilePath();
-                    if (File.Exists(localPath)) {
-                        string localJson = File.ReadAllText(localPath);
-                        JObject localObj = JObject.Parse(localJson);
-                        baseObj.Merge(localObj, new JsonMergeSettings {
+                    string instancePath = GetInstanceFilePath();
+                    if (File.Exists(instancePath)) {
+                        merged.Merge(JObject.Parse(File.ReadAllText(instancePath)), new JsonMergeSettings {
                             MergeArrayHandling = MergeArrayHandling.Replace
                         });
                     }
 
-                    currentSettings = JsonUtility.FromJson<TSettings>(baseObj.ToString());
+                    string localPath = GetLocalFilePath();
+                    if (File.Exists(localPath)) {
+                        merged.Merge(JObject.Parse(File.ReadAllText(localPath)), new JsonMergeSettings {
+                            MergeArrayHandling = MergeArrayHandling.Replace
+                        });
+                    }
+
+                    currentSettings = JsonUtility.FromJson<TSettings>(merged.ToString());
                 }
             } catch (Exception ex) {
                 Debug.LogException(ex);
@@ -189,15 +213,41 @@ namespace Bluecadet.Utils {
             }
         }
 
+        /// Writes only the given dirty fields to the instance overrides file (settings.[machineId].json).
+        /// Creates the file if it doesn't exist. Removes saved paths from the local file.
+        public void SaveToInstanceFile(IEnumerable<string> dirtyPaths) {
+            string instancePath = GetInstanceFilePath();
+
+            JObject instanceObj = File.Exists(instancePath)
+                ? JObject.Parse(File.ReadAllText(instancePath))
+                : new JObject();
+
+            JObject currentObj = ToJObject(currentSettings);
+            foreach (string path in dirtyPaths) {
+                SetNestedValue(instanceObj, currentObj, path.Split('.'), 0);
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(instancePath));
+            File.WriteAllText(instancePath, instanceObj.ToString(Newtonsoft.Json.Formatting.Indented));
+            RemovePathsFromLocalFile(dirtyPaths);
+        }
+
         /// Writes only the given dirty fields to the local overrides file.
-        /// A dirty field is written only if it differs from the base file value;
-        /// if it matches base, it is removed from local (no override needed).
+        /// A dirty field is written only if it differs from the effective base+instance value;
+        /// if it matches, it is removed from local (no override needed).
         /// Deletes the local file if no overrides remain.
         public void SaveToLocalFile(IEnumerable<string> dirtyPaths) {
             string basePath = GetBaseFilePath();
-            JObject baseObj = File.Exists(basePath)
+            JObject effectiveObj = File.Exists(basePath)
                 ? JObject.Parse(File.ReadAllText(basePath))
                 : ToJObject(new TSettings());
+
+            string instancePath = GetInstanceFilePath();
+            if (File.Exists(instancePath)) {
+                effectiveObj.Merge(JObject.Parse(File.ReadAllText(instancePath)), new JsonMergeSettings {
+                    MergeArrayHandling = MergeArrayHandling.Replace
+                });
+            }
 
             JObject currentObj = ToJObject(currentSettings);
 
@@ -208,10 +258,10 @@ namespace Bluecadet.Utils {
 
             foreach (string path in dirtyPaths) {
                 string[] parts = path.Split('.');
-                JToken baseVal = GetNestedValue(baseObj, parts);
+                JToken effectiveVal = GetNestedValue(effectiveObj, parts);
                 JToken currentVal = GetNestedValue(currentObj, parts);
 
-                if (currentVal != null && !JToken.DeepEquals(baseVal, currentVal)) {
+                if (currentVal != null && !JToken.DeepEquals(effectiveVal, currentVal)) {
                     SetNestedValue(localObj, currentObj, parts, 0);
                 } else {
                     RemoveNestedPath(localObj, parts, 0);
