@@ -13,9 +13,11 @@ namespace Bluecadet.Utils.Tests
         public class TestSettingsManager : SettingsManager<AppSettings>
         {
             public string BasePath;
+            public string InstancePath;
             public string LocalPath;
 
             public override string GetBaseFilePath() => BasePath;
+            public override string GetInstanceFilePath() => InstancePath;
             public override string GetLocalFilePath() => LocalPath;
         }
 
@@ -32,6 +34,7 @@ namespace Bluecadet.Utils.Tests
             _go = new GameObject("SettingsManager");
             _manager = _go.AddComponent<TestSettingsManager>();
             _manager.BasePath = Path.Combine(_tempDir, "settings.json");
+            _manager.InstancePath = Path.Combine(_tempDir, "settings.TEST-MACHINE.json");
             _manager.LocalPath = Path.Combine(_tempDir, "settings.local.json");
         }
 
@@ -48,11 +51,17 @@ namespace Bluecadet.Utils.Tests
         private void WriteBaseJson(string json) =>
             File.WriteAllText(_manager.BasePath, json);
 
+        private void WriteInstanceJson(string json) =>
+            File.WriteAllText(_manager.InstancePath, json);
+
         private void WriteLocalJson(string json) =>
             File.WriteAllText(_manager.LocalPath, json);
 
         private JObject ReadBaseJson() =>
             JObject.Parse(File.ReadAllText(_manager.BasePath));
+
+        private JObject ReadInstanceJson() =>
+            JObject.Parse(File.ReadAllText(_manager.InstancePath));
 
         private JObject ReadLocalJson() =>
             JObject.Parse(File.ReadAllText(_manager.LocalPath));
@@ -107,6 +116,7 @@ namespace Bluecadet.Utils.Tests
                 "debugMode should be the default value.");
         }
 
+#if UNITY_EDITOR
         [Test]
         public void LoadFromFile_MissingBaseFile_CreatesBaseFile()
         {
@@ -115,6 +125,7 @@ namespace Bluecadet.Utils.Tests
             Assert.That(File.Exists(_manager.BasePath), Is.True,
                 "LoadFromFile should create a base file when none exists.");
         }
+#endif
 
         // ── SaveToBaseFile tests ─────────────────────────────────────────────────
 
@@ -261,6 +272,93 @@ namespace Bluecadet.Utils.Tests
                 "debugMode should be present in local file (differs from base).");
             Assert.That(local["general"]?["showCursor"], Is.Null,
                 "showCursor should not be in local file (matches base).");
+        }
+
+        // ── SaveToInstanceFile tests ─────────────────────────────────────────────
+
+        [Test]
+        public void SaveToInstanceFile_DirtyPath_WritesValueToFile()
+        {
+            _manager.LoadFromFile();
+            _manager.currentSettings.general.debugMode = true;
+
+            _manager.SaveToInstanceFile(new[] { "general.debugMode" });
+
+            JObject saved = ReadInstanceJson();
+            Assert.That((bool)saved["general"]["debugMode"], Is.True,
+                "Saved instance file should contain debugMode = true.");
+        }
+
+        [Test]
+        public void SaveToInstanceFile_RemovesPathFromLocalFile()
+        {
+            WriteBaseJson(@"{ ""general"": { ""debugMode"": false, ""showCursor"": false } }");
+            WriteLocalJson(@"{ ""general"": { ""debugMode"": true, ""showCursor"": true } }");
+            _manager.LoadFromFile();
+
+            _manager.SaveToInstanceFile(new[] { "general.debugMode" });
+
+            Assert.That(File.Exists(_manager.LocalPath), Is.True,
+                "Local file should still exist (showCursor override remains).");
+            JObject local = ReadLocalJson();
+            Assert.That(local["general"]?["debugMode"], Is.Null,
+                "debugMode should be removed from local file after saving to instance.");
+        }
+
+        [Test]
+        public void SaveToInstanceFile_OnlyLocalPath_DeletesLocalFile()
+        {
+            WriteBaseJson(@"{ ""general"": { ""debugMode"": false } }");
+            WriteLocalJson(@"{ ""general"": { ""debugMode"": true } }");
+            _manager.LoadFromFile();
+
+            _manager.SaveToInstanceFile(new[] { "general.debugMode" });
+
+            Assert.That(File.Exists(_manager.LocalPath), Is.False,
+                "Local file should be deleted when its only override is promoted to instance.");
+        }
+
+        // ── Instance layer load tests ────────────────────────────────────────────
+
+        [Test]
+        public void LoadFromFile_InstanceOverridesBase_InstanceValueWins()
+        {
+            WriteBaseJson(@"{ ""general"": { ""debugMode"": false } }");
+            WriteInstanceJson(@"{ ""general"": { ""debugMode"": true } }");
+
+            _manager.LoadFromFile();
+
+            Assert.That(_manager.currentSettings.general.debugMode, Is.True,
+                "Instance override should win over base value.");
+        }
+
+        [Test]
+        public void LoadFromFile_LocalOverridesInstance_LocalValueWins()
+        {
+            WriteBaseJson(@"{ ""general"": { ""debugMode"": false } }");
+            WriteInstanceJson(@"{ ""general"": { ""debugMode"": true } }");
+            WriteLocalJson(@"{ ""general"": { ""debugMode"": false } }");
+
+            _manager.LoadFromFile();
+
+            Assert.That(_manager.currentSettings.general.debugMode, Is.False,
+                "Local override should win over instance value.");
+        }
+
+        [Test]
+        public void SaveToLocalFile_ValueMatchesInstance_NotWrittenToLocalFile()
+        {
+            WriteBaseJson(@"{ ""general"": { ""debugMode"": false } }");
+            WriteInstanceJson(@"{ ""general"": { ""debugMode"": true } }");
+            _manager.LoadFromFile();
+            // In-memory value matches the effective (base+instance) value — no local override needed.
+
+            _manager.SaveToLocalFile(new[] { "general.debugMode" });
+
+            bool localHasDebugMode = File.Exists(_manager.LocalPath)
+                && ReadLocalJson()["general"]?["debugMode"] != null;
+            Assert.That(localHasDebugMode, Is.False,
+                "A value matching the effective base+instance should not be written to local.");
         }
 
         // ── Round-trip tests ─────────────────────────────────────────────────────
