@@ -2,6 +2,20 @@
 
 All notable changes will be documented here.
 
+## [1.1.0] - 2026-05-28
+
+### Added
+
+- Add CommandLineArgs singleton utility
+- Remove JTokenExtensions and JsonValidationException
+- Add target frame rate and vsync settings to SettingsManager
+- Resolve settings directory from --assetsPath CLI flag
+- Remove built-in key bindings from SettingsManager
+- Move Setup Script Templates to Tools menu
+### Fixed
+
+- Don't LogException when base settings file doesn't exist
+
 ## [1.0.1] - 2026-05-20
 
 ### Fixed

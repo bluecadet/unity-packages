@@ -2,6 +2,15 @@
 
 All notable changes will be documented here.
 
+## [1.0.4] - 2026-05-28
+
+### Changed
+
+- Extract DecodeScheduler from DecodeLoop
+- Introduce HapFormat domain type
+- Add TryAcquire/HapFrameLease to ring buffer
+- Extract HapOutputPipeline from HapPlayer
+
 ## [1.0.3] - 2026-05-28
 
 ### Fixed
