@@ -13,7 +13,7 @@ namespace Bluecadet.Utils
 
 		public static T Get(bool createIfNotFound = false)
 		{
-			if (Singleton.Quitting)
+			if (Singleton.Quitting && Application.isPlaying)
 			{
 				Debug.LogWarning($"[Singleton<{typeof(T)}>] Instance will not be returned because the application is quitting.");
 				return null;
