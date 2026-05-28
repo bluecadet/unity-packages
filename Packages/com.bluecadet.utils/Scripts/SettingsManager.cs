@@ -19,6 +19,8 @@ namespace Bluecadet.Utils {
             public Vector2Int screenSize = new Vector2Int(1920, 1080);
             public Vector2Int screenPosition = new Vector2Int(0, 0);
             public bool fullscreen = false;
+            public int targetFrameRate = 60;
+            public bool vSync = true;
         }
 
         public GeneralSettings general = new();
@@ -323,6 +325,8 @@ namespace Bluecadet.Utils {
 
             Screen.SetResolution(s.screenSize.x, s.screenSize.y, s.fullscreen);
             Cursor.visible = s.showCursor;
+            Application.targetFrameRate = s.targetFrameRate;
+            QualitySettings.vSyncCount = s.vSync ? 1 : 0;
         }
     }
 
