@@ -710,10 +710,8 @@ namespace Bluecadet.Hap
 
             try
             {
-                int lastExplicit = -1;      // last frame satisfied in response to a main-thread request
-                int lastDecoded  = -1;      // most recent frame written to the ring buffer; -1 = nothing yet
-                bool prefetchDone = false;
-                int consecutiveErrors = 0;  // circuit-breaker: stop on repeated native failures
+                var scheduler = new DecodeScheduler(frameCount);
+                int consecutiveErrors = 0;
 
                 while (_decodeRunning)
                 {
@@ -723,55 +721,24 @@ namespace Bluecadet.Hap
 
                     lock (_decodeLock)
                     {
-                        // Snapshot direction inside the lock so it is always consistent with
-                        // _decodeTargetFrame. Reading it outside could produce a stale direction
-                        // (e.g. the first pre-fetch after a reversal would go the wrong way).
+                        // Read direction inside the lock so it is always consistent with _decodeTargetFrame.
                         dir = _decodeDirection;
-                        int requested = _decodeTargetFrame;
+                        var (t, pf, block) = scheduler.Next(_decodeTargetFrame, dir);
 
-                        if (requested != lastExplicit)
+                        if (block)
                         {
-                            if (requested == lastDecoded)
-                            {
-                                // Already in the ring buffer from a pre-fetch — no decode needed.
-                                // Apply the same sequential check as the explicit-decode path: only
-                                // enable pre-fetch if this request is the natural next frame from the
-                                // previous one. A seek that happens to land on the pre-fetched slot
-                                // should not blindly pre-fetch the frame after it.
-                                bool wasSeq = lastExplicit < 0 ||
-                                              requested == (lastExplicit + dir + frameCount) % frameCount;
-                                lastExplicit = requested;
-                                prefetchDone = !wasSeq;
-                                // target == -1 is the sentinel meaning "already buffered, skip decode"
-                                target = -1;
-                                isPrefetch = false;
-                            }
-                            else
-                            {
-                                // Decode this frame in response to a main-thread request.
-                                target = requested;
-                                isPrefetch = false;
-                            }
-                        }
-                        else if (!prefetchDone && lastDecoded >= 0 && frameCount > 1)
-                        {
-                            // Caught up with the main thread. Pre-fetch the next sequential
-                            // frame (in the current direction) so it's ready before it's requested.
-                            target = (lastDecoded + dir + frameCount) % frameCount;
-                            isPrefetch = true;
-                        }
-                        else
-                        {
-                            // Pre-fetch done (or not applicable). Block until the main thread
-                            // requests a new frame or signals exit.
-                            while (_decodeRunning && _decodeTargetFrame == lastExplicit)
-                                Monitor.Wait(_decodeLock, 100);  // 100ms safety timeout in case Pulse is missed during a Close() race
+                            // Block until the main thread requests a new frame or signals exit.
+                            // 100ms safety timeout guards against Pulse being missed during a Close() race.
+                            while (_decodeRunning && _decodeTargetFrame == scheduler.LastExplicit)
+                                Monitor.Wait(_decodeLock, 100);
 
                             if (!_decodeRunning) break;
-                            target = _decodeTargetFrame;
-                            isPrefetch = false;
-                            prefetchDone = false;
+                            dir = _decodeDirection;
+                            (t, pf, _) = scheduler.Next(_decodeTargetFrame, dir);
                         }
+
+                        target = t;
+                        isPrefetch = pf;
                     }
 
                     // Frame was already in the ring buffer — no decode work to do.
@@ -818,7 +785,6 @@ namespace Bluecadet.Hap
                     {
                         consecutiveErrors = 0;
                         ringBuffer.CommitWrite(target);
-                        lastDecoded = target;
 
                         // Asynchronously warm the OS page cache for the next-in-sequence frame.
                         // Warming after both explicit and pre-fetch decodes keeps the pipeline
@@ -829,20 +795,7 @@ namespace Bluecadet.Hap
                             HapNative.hap_prefetch_frame(handle, nextFrame);
                         }
 
-                        if (isPrefetch)
-                        {
-                            prefetchDone = true;
-                        }
-                        else
-                        {
-                            // Only pre-fetch if this was a sequential step in the current
-                            // direction. After a seek/scrub the next request is unpredictable,
-                            // so skip the pre-fetch — don't waste a decode slot on the wrong frame.
-                            bool wasSequential = lastExplicit < 0 ||
-                                                 target == (lastExplicit + dir + frameCount) % frameCount;
-                            lastExplicit = target;
-                            prefetchDone = !wasSequential;
-                        }
+                        scheduler.OnDecoded(target, isPrefetch, dir);
                     }
                 }
             }
