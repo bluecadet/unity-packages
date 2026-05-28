@@ -678,23 +678,8 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Background thread: waits for frame requests, decodes them, and commits to ring buffer.
-        ///
-        /// Two separate counters prevent a re-decode spin that would otherwise occur when
-        /// look-ahead is added:
-        ///   lastExplicit — the last frame index the main thread requested that we satisfied
-        ///                  (either by decoding it, or by finding it already in the buffer).
-        ///   lastDecoded  — the most recently written ring-buffer slot (may be a pre-fetch).
-        ///
-        /// Flow each iteration:
-        ///   1. If _decodeTargetFrame != lastExplicit → main thread wants a new frame.
-        ///        If it's already in the buffer (== lastDecoded from a prior pre-fetch),
-        ///        just update lastExplicit and skip decoding; otherwise decode it.
-        ///   2. Else if no pre-fetch done yet → pre-fetch the next sequential frame so it
-        ///        is ready before the main thread asks for it (eliminates per-frame I/O stall).
-        ///   3. Else → block until main thread requests a new frame.
-        ///
-        /// This keeps the pipeline full during linear playback and still responds immediately
-        /// to seeks/scrubbing without re-decoding the same frame in a tight loop.
+        /// Scheduling logic (explicit vs. prefetch, when to block) is delegated to
+        /// <see cref="DecodeScheduler"/>.
         /// </summary>
         void DecodeLoop()
         {
