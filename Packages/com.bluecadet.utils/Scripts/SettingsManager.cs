@@ -3,9 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem;
-#endif
 
 namespace Bluecadet.Utils {
 
@@ -92,29 +89,6 @@ namespace Bluecadet.Utils {
 
         void Start() {
             LoadFromFile();
-        }
-
-
-        void Update() {
-#if ENABLE_INPUT_SYSTEM
-            if (Keyboard.current != null) {
-                if (Keyboard.current.cKey.wasPressedThisFrame) {
-                    currentSettings.general.showCursor = !currentSettings.general.showCursor;
-                    ApplyGeneralSettings();
-                }
-                if (Keyboard.current.rKey.wasPressedThisFrame) {
-                    LoadFromFile();
-                }
-            }
-#else
-            if (Input.GetKeyDown(KeyCode.C)) {
-                currentSettings.general.showCursor = !currentSettings.general.showCursor;
-                ApplyGeneralSettings();
-            }
-            if (Input.GetKeyDown(KeyCode.R)) {
-                LoadFromFile();
-            }
-#endif
         }
 
         /// Loads settings from the base file, then merges any local overrides on top.
