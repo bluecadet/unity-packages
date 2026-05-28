@@ -40,7 +40,7 @@ namespace {0} {{
     }}
 }}";
 
-        [MenuItem("Bluecadet/Setup Script Templates")]
+        [MenuItem("Tools/Bluecadet/Setup Script Templates")]
         public static void Setup() {
             // Open input dialog to get the namespace
             string ns = EditorInputDialog.Show("Setup Script Templates", "Enter the namespace for the project:", "");
