@@ -69,8 +69,8 @@ namespace Bluecadet.Hap
         /// <summary>Ring buffer passing decoded frames from the decode thread to the main thread.</summary>
         HapFrameRingBuffer _ringBuffer;
 
-        /// <summary>One uploader per frame-in-flight slot; cycled by frame count to prevent CPU/GPU races.</summary>
-        HapTextureUploader[] _uploaders;
+        /// <summary>Owns the output RT pair, uploader ring, and blit material.</summary>
+        HapOutputPipeline _outputPipeline;
 
         // ─────────────────────────────────────────────────────────────────────
         // Video metadata (populated on Open)
@@ -92,9 +92,6 @@ namespace Bluecadet.Hap
 
         /// <summary>True if playback is advancing (not paused/stopped).</summary>
         bool _playing;
-
-        /// <summary>Frame index of the last frame uploaded to the texture (to avoid redundant uploads).</summary>
-        int _lastUploadedFrame = -1;
 
         /// <summary>
         /// Unity frame count when the video was last opened. We skip GPU uploads in the same frame
@@ -147,23 +144,6 @@ namespace Bluecadet.Hap
         static readonly int MainTexId = Shader.PropertyToID("_MainTex");
 
         // ─────────────────────────────────────────────────────────────────────
-        // Output RenderTexture (all formats)
-        // ─────────────────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Double-buffered output RenderTextures. The blit writes to slot [writeIndex]
-        /// while the scene reads slot [_displayIndex] (written last frame). writeIndex is
-        /// always (_displayIndex+1)%2, guaranteeing the two slots are different resources
-        /// every frame — even when video frames are skipped — preventing the D3D12
-        /// within-frame write→read hazard on the same RT.
-        /// </summary>
-        RenderTexture[] _outputRTs;
-        int _displayIndex;
-
-        /// <summary>Material used for the output blit. Shader varies by format.</summary>
-        Material _outputMat;
-
-        // ─────────────────────────────────────────────────────────────────────
         // Profiler markers (visible in Unity Profiler)
         // ─────────────────────────────────────────────────────────────────────
 
@@ -194,9 +174,7 @@ namespace Bluecadet.Hap
         /// The current video frame as a correctly-oriented RGBA RenderTexture.
         /// Falls back to the raw DXT Texture2D if the output shader failed to load.
         /// </summary>
-        public Texture Texture => _outputRTs != null
-            ? (Texture)_outputRTs[_displayIndex]
-            : (Texture)_uploaders?[UnityEngine.Time.frameCount % _uploaders.Length]?.Texture;
+        public Texture Texture => (Texture)_outputPipeline?.DisplayTexture ?? (Texture)_outputPipeline?.RawTexture;
 
         public bool IsPlaying => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
         public bool IsOpen => _handle != IntPtr.Zero;
@@ -379,12 +357,8 @@ namespace Bluecadet.Hap
                     break;
             }
 
-            // Advance the display index to the slot just written, AFTER the scene has
-            // rendered from the previous slot. Using (_displayIndex+1)%N — not frameCount%N —
-            // guarantees the write slot and display slot are always different resources,
-            // even when video frames are skipped (e.g. 24fps video at 60fps Unity).
-            if (uploadedNewFrame && _outputRTs != null)
-                _displayIndex = (_displayIndex + 1) % _outputRTs.Length;
+            if (uploadedNewFrame)
+                _outputPipeline?.SwapBuffers();
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -494,49 +468,10 @@ namespace Bluecadet.Hap
             // Create ring buffer for passing decoded frames from decode thread to main thread
             _ringBuffer = new HapFrameRingBuffer(_frameBufferSize);
 
-            // Set up the output blit pipeline.
-            // All formats need a V-flip to correct Unity's raw DXT orientation
-            // (HAP stores top-to-bottom; LoadRawTextureData treats it as bottom-to-top).
-            // HAP Q additionally needs YCoCg→RGB color space conversion.
-            string shaderName = format.ShaderName();
-            var outputShader = Resources.Load<Shader>(shaderName);
-            if (outputShader == null)
-            {
-                Debug.LogError($"[HapPlayer] Output shader '{shaderName}' not found — video will be unflipped");
-            }
-            else
-            {
-                _outputMat = new Material(outputShader) { hideFlags = HideFlags.HideAndDontSave };
-                _outputRTs = new RenderTexture[2];
-                _displayIndex = 0;
-                for (int i = 0; i < 2; i++)
-                {
-                    _outputRTs[i] = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
-                    {
-                        filterMode = FilterMode.Bilinear,
-                        wrapMode = TextureWrapMode.Clamp,
-                        hideFlags = HideFlags.HideAndDontSave
-                    };
-                    _outputRTs[i].Create();
-                }
-
-                // Uploaders need one slot per frame-in-flight so a CPU Apply() and a GPU
-                // blit never target the same Texture2D. Output RTs only need 2: the GPU
-                // graphics queue is sequential, so the write slot and display slot are
-                // always from different (already-completed) submissions.
-                int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
-                _uploaders = new HapTextureUploader[uploaderCount];
-                for (int i = 0; i < uploaderCount; i++)
-                    _uploaders[i] = new HapTextureUploader(_width, _height, format);
-
-                // Initialize both RT slots to opaque black so D3D12 never reads
-                // uninitialized memory before the first video frame arrives.
-                for (int i = 0; i < 2; i++)
-                    Graphics.Blit(Texture2D.blackTexture, _outputRTs[i]);
-            }
+            int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
+            _outputPipeline = new HapOutputPipeline(_width, _height, format, uploaderCount);
 
             _clock = 0f;
-            _lastUploadedFrame = -1;
             _openedFrame = UnityEngine.Time.frameCount;
 
             // Start background decode thread
@@ -602,32 +537,11 @@ namespace Bluecadet.Hap
             }
 
             // Dispose managed resources
-            if (_uploaders != null)
-            {
-                foreach (var u in _uploaders) u?.Dispose();
-                _uploaders = null;
-            }
+            _outputPipeline?.Dispose();
+            _outputPipeline = null;
 
             _ringBuffer?.Dispose();
             _ringBuffer = null;
-
-            if (_outputRTs != null)
-            {
-                foreach (var rt in _outputRTs)
-                {
-                    if (rt != null)
-                    {
-                        rt.Release();
-                        UnityEngine.Object.Destroy(rt);
-                    }
-                }
-                _outputRTs = null;
-            }
-            if (_outputMat != null)
-            {
-                UnityEngine.Object.Destroy(_outputMat);
-                _outputMat = null;
-            }
 
             // Close native handle.  Mark invalid before the call so the decode
             // thread (if it somehow missed _decodeRunning = false) can detect
@@ -643,7 +557,6 @@ namespace Bluecadet.Hap
             _frameCount = 0;
             _frameRate = 0;
             _duration = 0;
-            _lastUploadedFrame = -1;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -801,7 +714,7 @@ namespace Bluecadet.Hap
         bool UploadFrame()
         {
             var ringBuffer = _ringBuffer;
-            if (ringBuffer == null) return false;
+            if (ringBuffer == null || _outputPipeline == null) return false;
 
             // Skip GPU uploads in the same frame that Open() ran. D3D12 requires at least one
             // command-list flush between RenderTexture.Create() and the first blit that targets it.
@@ -809,21 +722,7 @@ namespace Bluecadet.Hap
 
             if (!ringBuffer.TryAcquire(out var lease)) return false;
             using (lease)
-            {
-                if (lease.FrameIndex == _lastUploadedFrame) return false;
-
-                var uploader = _uploaders[UnityEngine.Time.frameCount % _uploaders.Length];
-                uploader.Upload(lease.Data);
-
-                if (_outputRTs != null && _outputMat != null)
-                {
-                    int writeIndex = (_displayIndex + 1) % _outputRTs.Length;
-                    Graphics.Blit(uploader.Texture, _outputRTs[writeIndex], _outputMat);
-                }
-
-                _lastUploadedFrame = lease.FrameIndex;
-                return _outputRTs != null && _outputMat != null;
-            }
+                return _outputPipeline.Upload(lease.Data, lease.FrameIndex);
         }
     }
 }
