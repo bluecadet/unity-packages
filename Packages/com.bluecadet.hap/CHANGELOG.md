@@ -2,6 +2,14 @@
 
 All notable changes will be documented here.
 
+## [1.0.3] - 2026-05-28
+
+### Fixed
+
+- Extend output RT ring depth to match GPU pipeline depth
+- Fix RT write index to always differ from display index
+- Restore output RT count to 2, decouple from uploader ring depth
+
 ## [1.0.2] - 2026-05-27
 
 ### Fixed
