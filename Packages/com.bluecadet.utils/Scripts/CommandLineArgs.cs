@@ -4,6 +4,7 @@ using UnityEngine;
 
 namespace Bluecadet.Utils
 {
+	[UnityEngine.ExecuteInEditMode]
 	public class CommandLineArgs : Singleton<CommandLineArgs>
 	{
 		[SerializeField]
@@ -23,7 +24,7 @@ namespace Bluecadet.Utils
 
 		private void Awake()
 		{
-			if (_persistAcrossScenes)
+			if (_persistAcrossScenes && Application.isPlaying)
 				DontDestroyOnLoad(gameObject);
 
 #if UNITY_EDITOR
@@ -32,6 +33,13 @@ namespace Bluecadet.Utils
 			ParseArgs(System.Environment.GetCommandLineArgs());
 #endif
 		}
+
+#if UNITY_EDITOR
+		private void OnValidate()
+		{
+			ParseArgs(TokenizeString(_editorArgs));
+		}
+#endif
 
 		private void ParseArgs(string[] args)
 		{

@@ -34,9 +34,9 @@ namespace Bluecadet.Utils {
         public virtual string GetBaseDirectory() {
             var cli = CommandLineArgs.Get();
             if (cli != null && cli.TryGetArg("--assetsPath", out string assetsPath)) {
-                Debug.Log($"[SettingsManager] Using --assetsPath override: {assetsPath}");
                 return assetsPath;
             }
+            
             return Application.streamingAssetsPath;
         }
 
