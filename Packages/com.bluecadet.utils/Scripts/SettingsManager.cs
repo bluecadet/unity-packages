@@ -30,12 +30,25 @@ namespace Bluecadet.Utils {
     /// Exists so the custom editor can target all generic variants.
     [ExecuteInEditMode]
     public abstract class SettingsManagerBase : MonoBehaviour {
+        /// Returns the directory from which settings files are loaded.
+        /// If a CommandLineArgs component is present in the scene and provides an
+        /// --assetsPath flag, that path is used. Otherwise falls back to
+        /// Application.streamingAssetsPath. Override to supply a fixed directory.
+        public virtual string GetBaseDirectory() {
+            var cli = CommandLineArgs.Get();
+            if (cli != null && cli.TryGetArg("--assetsPath", out string assetsPath)) {
+                Debug.Log($"[SettingsManager] Using --assetsPath override: {assetsPath}");
+                return assetsPath;
+            }
+            return Application.streamingAssetsPath;
+        }
+
         public virtual string GetBaseFilePath() {
-            return Path.Combine(Application.streamingAssetsPath, "settings.json");
+            return Path.Combine(GetBaseDirectory(), "settings.json");
         }
 
         public virtual string GetLocalFilePath() {
-            return Path.Combine(Application.streamingAssetsPath, "settings.local.json");
+            return Path.Combine(GetBaseDirectory(), "settings.local.json");
         }
     }
 
