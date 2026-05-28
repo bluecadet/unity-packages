@@ -18,6 +18,7 @@ public class SettingsManagerEditor : Editor
 
     private SettingsWrapper _wrapper;
     private SerializedObject _wrapperSO;
+    private AppSettings _lastKnownSettings;
     private HashSet<string> _instanceOverridePaths = new();
     private HashSet<string> _localOverridePaths = new();
     private bool _stateInitialized = false;
@@ -64,6 +65,8 @@ public class SettingsManagerEditor : Editor
 
     void OnDisable()
     {
+        _wrapperSO?.Dispose();
+        _wrapperSO = null;
         if (_wrapper != null)
             DestroyImmediate(_wrapper);
     }
@@ -87,10 +90,19 @@ public class SettingsManagerEditor : Editor
     {
         RefreshFileState();
 
-        // Draw currentSettings via the wrapper
+        // Draw currentSettings via the wrapper; only recreate SerializedObject when the reference changes.
         var currentSettings = (AppSettings)GetCurrentSettings();
-        _wrapper.settings = currentSettings;
-        _wrapperSO = new SerializedObject(_wrapper);
+        if (_wrapperSO == null || !ReferenceEquals(currentSettings, _lastKnownSettings))
+        {
+            _wrapperSO?.Dispose();
+            _wrapper.settings = currentSettings;
+            _wrapperSO = new SerializedObject(_wrapper);
+            _lastKnownSettings = currentSettings;
+        }
+        else
+        {
+            _wrapperSO.Update();
+        }
 
         var settingsProp = _wrapperSO.FindProperty("settings");
 
