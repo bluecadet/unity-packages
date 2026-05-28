@@ -2,6 +2,13 @@
 
 All notable changes will be documented here.
 
+## [1.1.1] - 2026-05-28
+
+### Fixed
+
+- Make CommandLineArgs execute in edit mode
+- Allow Singleton.Get() in edit mode after play mode exit
+
 ## [1.1.0] - 2026-05-28
 
 ### Added
