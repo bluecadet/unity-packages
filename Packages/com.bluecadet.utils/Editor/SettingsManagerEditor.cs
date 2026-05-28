@@ -315,25 +315,20 @@ public class SettingsManagerEditor : Editor
                 }
                 if (foldoutTint == null)
                 {
+                    bool hasLocalChild = false;
                     foreach (var p in _localOverridePaths)
-                    {
-                        if (p.StartsWith(childPrefix) || p == jsonPath)
-                        {
-                            foldoutTint = OverrideTint;
-                            break;
-                        }
-                    }
-                }
-                if (foldoutTint == null)
-                {
+                        if (p.StartsWith(childPrefix) || p == jsonPath) { hasLocalChild = true; break; }
+
+                    bool hasInstanceChild = false;
                     foreach (var p in _instanceOverridePaths)
-                    {
-                        if (p.StartsWith(childPrefix) || p == jsonPath)
-                        {
-                            foldoutTint = InstanceTint;
-                            break;
-                        }
-                    }
+                        if (p.StartsWith(childPrefix) || p == jsonPath) { hasInstanceChild = true; break; }
+
+                    if (hasLocalChild && hasInstanceChild)
+                        foldoutTint = Color.Lerp(OverrideTint, InstanceTint, 0.5f);
+                    else if (hasLocalChild)
+                        foldoutTint = OverrideTint;
+                    else if (hasInstanceChild)
+                        foldoutTint = InstanceTint;
                 }
 
                 if (foldoutTint.HasValue)
