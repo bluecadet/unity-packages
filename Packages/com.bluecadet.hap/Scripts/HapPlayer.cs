@@ -380,10 +380,12 @@ namespace Bluecadet.Hap
                     break;
             }
 
-            // Advance the display index to the slot we just wrote, AFTER the scene has
-            // rendered from the previous slot. Next frame's scene draw reads this slot.
+            // Advance the display index to the slot just written, AFTER the scene has
+            // rendered from the previous slot. Using (_displayIndex+1)%N — not frameCount%N —
+            // guarantees the write slot and display slot are always different resources,
+            // even when video frames are skipped (e.g. 24fps video at 60fps Unity).
             if (uploadedNewFrame && _outputRTs != null)
-                _displayIndex = UnityEngine.Time.frameCount % _outputRTs.Length;
+                _displayIndex = (_displayIndex + 1) % _outputRTs.Length;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -892,7 +894,7 @@ namespace Bluecadet.Hap
             // so the write slot and the display slot are always different resources this frame.
             if (_outputRTs != null && _outputMat != null)
             {
-                int writeIndex = UnityEngine.Time.frameCount % _outputRTs.Length;
+                int writeIndex = (_displayIndex + 1) % _outputRTs.Length;
                 Graphics.Blit(uploader.Texture, _outputRTs[writeIndex], _outputMat);
             }
 
