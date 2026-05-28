@@ -2,6 +2,20 @@
 
 All notable changes will be documented here.
 
+## [1.1.0] - 2026-05-28
+
+### Added
+
+- Move open/close onto background threads
+
+### Changed
+
+- Split HapPlayer into focused modules
+
+### Fixed
+
+- Ignore cliff.toml.meta
+
 ## [1.0.4] - 2026-05-28
 
 ### Changed
