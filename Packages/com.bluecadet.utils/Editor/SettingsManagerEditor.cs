@@ -18,21 +18,25 @@ public class SettingsManagerEditor : Editor
 
     private SettingsWrapper _wrapper;
     private SerializedObject _wrapperSO;
+    private HashSet<string> _instanceOverridePaths = new();
     private HashSet<string> _localOverridePaths = new();
     private bool _stateInitialized = false;
 
     // Dirty paths live on the manager so they survive inspector selection changes.
+    // _dirtyPathsFallback is a stable set used if reflection fails, so mutations are never silently dropped.
+    private HashSet<string> _dirtyPathsFallback = new();
     private HashSet<string> DirtyPaths => GetManagerDirtyPaths();
 
     private HashSet<string> GetManagerDirtyPaths()
     {
         var field = target.GetType().GetField("editorDirtyPaths",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        return field?.GetValue(target) as HashSet<string> ?? new HashSet<string>();
+        return field?.GetValue(target) as HashSet<string> ?? _dirtyPathsFallback;
     }
 
     private Type _settingsType;
 
+    private static readonly Color InstanceTint = new Color(0.6f, 1f, 0.7f, 1f);
     private static readonly Color OverrideTint = new Color(0.5f, 0.85f, 1f, 1f);
     private static readonly Color DirtyTint = new Color(1f, 0.9f, 0.6f, 1f);
 
@@ -105,10 +109,15 @@ public class SettingsManagerEditor : Editor
         }
 
         // Legend
-        if (_localOverridePaths.Count > 0 || DirtyPaths.Count > 0)
+        if (_instanceOverridePaths.Count > 0 || _localOverridePaths.Count > 0 || DirtyPaths.Count > 0)
         {
             EditorGUILayout.Space(2);
             var prev = GUI.backgroundColor;
+            if (_instanceOverridePaths.Count > 0)
+            {
+                GUI.backgroundColor = InstanceTint;
+                EditorGUILayout.HelpBox("Highlighted green = instance override", MessageType.None);
+            }
             if (_localOverridePaths.Count > 0)
             {
                 GUI.backgroundColor = OverrideTint;
@@ -127,6 +136,13 @@ public class SettingsManagerEditor : Editor
         if (GUILayout.Button("Save to Base File"))
         {
             InvokeMethod("SaveToBaseFile", new HashSet<string>(DirtyPaths));
+            DirtyPaths.Clear();
+            _stateInitialized = false;
+        }
+
+        if (GUILayout.Button("Save to Instance File"))
+        {
+            InvokeMethod("SaveToInstanceFile", new HashSet<string>(DirtyPaths));
             DirtyPaths.Clear();
             _stateInitialized = false;
         }
@@ -169,8 +185,10 @@ public class SettingsManagerEditor : Editor
     {
         var mgr = (SettingsManagerBase)target;
         var basePath = mgr.GetBaseFilePath();
+        var instancePath = mgr.GetInstanceFilePath();
         var localPath = mgr.GetLocalFilePath();
 
+        _instanceOverridePaths.Clear();
         _localOverridePaths.Clear();
 
         JObject mergedObj = new JObject();
@@ -180,6 +198,17 @@ public class SettingsManagerEditor : Editor
             try
             {
                 mergedObj = JObject.Parse(File.ReadAllText(basePath));
+            }
+            catch { }
+        }
+
+        if (!string.IsNullOrEmpty(instancePath) && File.Exists(instancePath))
+        {
+            try
+            {
+                JObject instanceObj = JObject.Parse(File.ReadAllText(instancePath));
+                FlattenPaths(instanceObj, "", _instanceOverridePaths);
+                mergedObj.Merge(instanceObj, new JsonMergeSettings { MergeArrayHandling = MergeArrayHandling.Replace });
             }
             catch { }
         }
@@ -248,12 +277,16 @@ public class SettingsManagerEditor : Editor
 
             Color prevBg = GUI.backgroundColor;
 
+            bool isInstanceOverridden = _instanceOverridePaths.Contains(jsonPath);
+
             if (!hasChildren)
             {
                 if (isDirty)
                     GUI.backgroundColor = DirtyTint;
                 else if (isOverridden)
                     GUI.backgroundColor = OverrideTint;
+                else if (isInstanceOverridden)
+                    GUI.backgroundColor = InstanceTint;
             }
 
             if (hasChildren)
@@ -275,6 +308,17 @@ public class SettingsManagerEditor : Editor
                         if (p.StartsWith(childPrefix) || p == jsonPath)
                         {
                             foldoutTint = OverrideTint;
+                            break;
+                        }
+                    }
+                }
+                if (foldoutTint == null)
+                {
+                    foreach (var p in _instanceOverridePaths)
+                    {
+                        if (p.StartsWith(childPrefix) || p == jsonPath)
+                        {
+                            foldoutTint = InstanceTint;
                             break;
                         }
                     }
