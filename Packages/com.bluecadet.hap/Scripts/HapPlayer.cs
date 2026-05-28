@@ -822,34 +822,23 @@ namespace Bluecadet.Hap
             // command-list flush between RenderTexture.Create() and the first blit that targets it.
             if (UnityEngine.Time.frameCount == _openedFrame) return false;
 
-            // Snapshot both frame index and data from the same _readIndex capture.
-            // Separate property reads would each re-read _readIndex, which the
-            // decode thread can change between them, producing a mismatched frame/data pair.
-            if (!ringBuffer.TryRead(out int readFrame, out var data)) return false;
-            if (readFrame == _lastUploadedFrame) return false;
-
-            // Select the uploader for this frame. Consecutive frames use different slots so
-            // frame N's CPU write and frame N-1's GPU read target different Texture2D resources.
-            var uploader = _uploaders[UnityEngine.Time.frameCount % _uploaders.Length];
-
-            // Upload the raw DXT/BC7 data into this frame's uploader slot (CPU memcpy).
-            uploader.Upload(data);
-
-            // CPU copy is done — release the ring-buffer pin so the decode thread can
-            // reuse the slot immediately rather than waiting for the next TryRead call.
-            ringBuffer.ClearPin();
-
-            // Blit through the output shader (flip + optional YCoCg decode) into the write slot.
-            // The caller advances _displayIndex AFTER the scene has rendered from the previous slot,
-            // so the write slot and the display slot are always different resources this frame.
-            if (_outputRTs != null && _outputMat != null)
+            if (!ringBuffer.TryAcquire(out var lease)) return false;
+            using (lease)
             {
-                int writeIndex = (_displayIndex + 1) % _outputRTs.Length;
-                Graphics.Blit(uploader.Texture, _outputRTs[writeIndex], _outputMat);
-            }
+                if (lease.FrameIndex == _lastUploadedFrame) return false;
 
-            _lastUploadedFrame = readFrame;
-            return _outputRTs != null && _outputMat != null;
+                var uploader = _uploaders[UnityEngine.Time.frameCount % _uploaders.Length];
+                uploader.Upload(lease.Data);
+
+                if (_outputRTs != null && _outputMat != null)
+                {
+                    int writeIndex = (_displayIndex + 1) % _outputRTs.Length;
+                    Graphics.Blit(uploader.Texture, _outputRTs[writeIndex], _outputMat);
+                }
+
+                _lastUploadedFrame = lease.FrameIndex;
+                return _outputRTs != null && _outputMat != null;
+            }
         }
     }
 }

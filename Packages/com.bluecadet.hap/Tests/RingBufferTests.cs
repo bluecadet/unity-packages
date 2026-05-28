@@ -154,5 +154,54 @@ namespace Bluecadet.Hap.Tests
             _buffer = new HapFrameRingBuffer(512);
             Assert.That(_buffer.SlotSize, Is.EqualTo(512));
         }
+
+        [Test]
+        public void TryAcquire_BeforeAnyCommit_ReturnsFalse()
+        {
+            _buffer = new HapFrameRingBuffer(1024);
+            bool result = _buffer.TryAcquire(out var lease);
+            Assert.That(result, Is.False);
+        }
+
+        [Test]
+        public void TryAcquire_AfterCommit_ReturnsLeaseWithCorrectFrame()
+        {
+            _buffer = new HapFrameRingBuffer(1024);
+            var s = _buffer.WriteSlot; s[0] = 0xFF;
+            _buffer.CommitWrite(7);
+
+            bool result = _buffer.TryAcquire(out var lease);
+            Assert.That(result, Is.True);
+            Assert.That(lease.FrameIndex, Is.EqualTo(7));
+            lease.Dispose();
+        }
+
+        [Test]
+        public void TryAcquire_Dispose_ClearsPin()
+        {
+            _buffer = new HapFrameRingBuffer(1024);
+            var s = _buffer.WriteSlot; s[0] = 1;
+            _buffer.CommitWrite(0);
+
+            _buffer.TryAcquire(out var lease);
+            lease.Dispose();
+
+            // After dispose, slots should be freely reusable
+            Assert.DoesNotThrow(() =>
+            {
+                for (int i = 1; i <= 4; i++)
+                {
+                    var si = _buffer.WriteSlot; si[0] = (byte)i;
+                    _buffer.CommitWrite(i);
+                }
+            });
+        }
+
+        [Test]
+        public void TryAcquire_DefaultLease_DisposeDoesNotThrow()
+        {
+            var lease = default(HapFrameLease);
+            Assert.DoesNotThrow(() => lease.Dispose());
+        }
     }
 }

@@ -181,6 +181,26 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
+        /// Atomically snapshot the latest decoded frame and acquire a pin on its slot,
+        /// returning a <see cref="HapFrameLease"/> that holds the data and releases the pin
+        /// automatically when disposed.
+        ///
+        /// Use in a <c>using</c> block; the pin is cleared when the block exits regardless
+        /// of whether the frame was actually used. Returns false if no frame has been committed.
+        /// Thread safety: Called only from the main thread.
+        /// </summary>
+        public bool TryAcquire(out HapFrameLease lease)
+        {
+            if (!TryRead(out int frameIndex, out NativeArray<byte> data))
+            {
+                lease = default;
+                return false;
+            }
+            lease = new HapFrameLease(frameIndex, data, this);
+            return true;
+        }
+
+        /// <summary>
         /// Free all native memory. Safe to call multiple times and from any thread —
         /// Interlocked.CompareExchange ensures only the first caller runs the dispose loop.
         /// </summary>
