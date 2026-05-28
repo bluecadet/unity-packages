@@ -151,12 +151,11 @@ namespace Bluecadet.Hap
         // ─────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Ring-buffered output RenderTextures (depth = max(2, maxQueuedFrames+1)).
-        /// Each frame writes to slot [frameCount % N] and exposes slot [_displayIndex]
-        /// (the slot written last frame) for scene reading. Because the ring is deeper
-        /// than D3D12's GPU pipeline, the write slot and any GPU-in-flight read slot are
-        /// always different resources, eliminating the D3D12 read/write hazard that
-        /// causes screen tearing on Windows.
+        /// Double-buffered output RenderTextures. The blit writes to slot [writeIndex]
+        /// while the scene reads slot [_displayIndex] (written last frame). writeIndex is
+        /// always (_displayIndex+1)%2, guaranteeing the two slots are different resources
+        /// every frame — even when video frames are skipped — preventing the D3D12
+        /// within-frame write→read hazard on the same RT.
         /// </summary>
         RenderTexture[] _outputRTs;
         int _displayIndex;
@@ -509,15 +508,10 @@ namespace Bluecadet.Hap
             }
             else
             {
-                // Ring depth must exceed D3D12's GPU pipeline depth (maxQueuedFrames) so the
-                // write slot and any GPU-in-flight read slot are always different resources.
-                // Use the same count for both uploaders and output RTs.
-                int ringDepth = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
-
                 _outputMat = new Material(outputShader) { hideFlags = HideFlags.HideAndDontSave };
-                _outputRTs = new RenderTexture[ringDepth];
+                _outputRTs = new RenderTexture[2];
                 _displayIndex = 0;
-                for (int i = 0; i < ringDepth; i++)
+                for (int i = 0; i < 2; i++)
                 {
                     _outputRTs[i] = new RenderTexture(_width, _height, 0, RenderTextureFormat.ARGB32)
                     {
@@ -528,13 +522,18 @@ namespace Bluecadet.Hap
                     _outputRTs[i].Create();
                 }
 
-                _uploaders = new HapTextureUploader[ringDepth];
-                for (int i = 0; i < ringDepth; i++)
+                // Uploaders need one slot per frame-in-flight so a CPU Apply() and a GPU
+                // blit never target the same Texture2D. Output RTs only need 2: the GPU
+                // graphics queue is sequential, so the write slot and display slot are
+                // always from different (already-completed) submissions.
+                int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
+                _uploaders = new HapTextureUploader[uploaderCount];
+                for (int i = 0; i < uploaderCount; i++)
                     _uploaders[i] = new HapTextureUploader(_width, _height, texFormat);
 
-                // Initialize all RT slots to opaque black so D3D12 never reads
+                // Initialize both RT slots to opaque black so D3D12 never reads
                 // uninitialized memory before the first video frame arrives.
-                for (int i = 0; i < ringDepth; i++)
+                for (int i = 0; i < 2; i++)
                     Graphics.Blit(Texture2D.blackTexture, _outputRTs[i]);
             }
 
