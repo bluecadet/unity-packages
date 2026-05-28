@@ -2,6 +2,19 @@
 
 All notable changes will be documented here.
 
+## [1.2.0] - 2026-05-28
+
+### Added
+
+- Add per-machine settings cascade layer (settings.[machineId].json)
+
+### Fixed
+
+- Use stable fallback set when editorDirtyPaths reflection fails
+- Dispose and reuse SerializedObject instead of recreating every frame
+- Guard file-creation assertion behind UNITY_EDITOR
+- Blend instance and local tints on foldouts with mixed child overrides
+
 ## [1.1.1] - 2026-05-28
 
 ### Fixed
