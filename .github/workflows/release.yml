@@ -64,14 +64,20 @@ jobs:
             exit 1
           fi
 
-          # Extract the section for this version (used as GitHub Release body)
+          # Extract the section for this version (source for _upm.changelog below)
           awk -v heading="$HEADING" \
             '/^## \[/{if(found) exit; if(index($0,heading)==1) found=1} found' \
             "$CHANGELOG" > /tmp/release-notes.md
 
           # Strip markdown syntax for _upm.changelog (plain text, \n-delimited)
+          # release-please writes linked/dated headings, e.g.
+          # "## [1.2.0](.../compare/...) (2026-08-03)"; the extra two rules
+          # below collapse that back to the plain "[1.2.0] - 2026-08-03"
+          # form. They no-op on the older "[X.Y.Z] - date" style headings.
           PLAIN=$(sed \
             -e 's/^## \[/[/' \
+            -e 's/\]([^)]*)/]/' \
+            -e 's/^\(\[[0-9.]*\]\) (\([0-9-]*\))$/\1 - \2/' \
             -e 's/^### //' \
             /tmp/release-notes.md \
             | sed '/^$/{ N; /^\n$/d }')
@@ -97,8 +103,12 @@ jobs:
           tar -tzf "${archive[0]}" | grep -qx 'package/package.json'
           tar -tzf "${archive[0]}" | grep -qx 'package/.attestation.p7m'
 
-      - name: Create GitHub Release
+      - name: Attach signed package to Release
         uses: softprops/action-gh-release@v2
         with:
+          # release-please already created the GitHub Release (with its own
+          # changelog-derived body) for this tag when the release PR merged.
+          # softprops/action-gh-release updates that existing release rather
+          # than creating a duplicate as long as we don't pass `body`/
+          # `body_path`/`name`, so we only upload the signed tarball here.
           files: "${{ env.DIST_DIR }}/*.tgz"
-          body_path: /tmp/release-notes.md
