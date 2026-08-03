@@ -99,7 +99,7 @@ Packages/com.bluecadet.<name>/
 All notable changes will be documented here.
 ```
 
-release-please prepends new version sections to this file, so no `cliff.toml` is needed for new packages — git-cliff and its per-package `cliff.toml` files are no longer part of the release flow (existing `cliff.toml` files are left in place but unused).
+release-please prepends new version sections to this file automatically.
 
 ### 3. Register the package with release-please
 
