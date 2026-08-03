@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   sign-and-release:
+    outputs:
+      package-name: ${{ steps.tag.outputs.name }}
     name: Sign and Release
     runs-on: ubuntu-latest
     env:
@@ -112,3 +114,16 @@ jobs:
           # than creating a duplicate as long as we don't pass `body`/
           # `body_path`/`name`, so we only upload the signed tarball here.
           files: "${{ env.DIST_DIR }}/*.tgz"
+
+  verify-openupm:
+    name: Verify OpenUPM Publish
+    needs: sign-and-release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: openupm/openupm-action@v1.0.1
+        with:
+          package: ${{ needs.sign-and-release.outputs.package-name }}
+          tag: ${{ github.ref_name }}
