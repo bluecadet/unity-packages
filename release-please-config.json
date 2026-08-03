@@ -20,6 +20,9 @@
     "Packages/com.bluecadet.hap": {
       "component": "com.bluecadet.hap"
     },
+    "Packages/com.bluecadet.launchpad": {
+      "component": "com.bluecadet.launchpad"
+    },
     "Packages/com.bluecadet.spring": {
       "component": "com.bluecadet.spring"
     },

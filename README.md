@@ -3,6 +3,7 @@
 | Package | Description |
 |---|---|
 | [com.bluecadet.hap](Packages/com.bluecadet.hap) | GPU-compressed HAP video playback |
+| [com.bluecadet.launchpad](Packages/com.bluecadet.launchpad) | Client for the Launchpad controller: version tracking, staged sync, and gated hot-swap |
 | [com.bluecadet.spring](Packages/com.bluecadet.spring) | Physics-based spring animations |
 | [com.bluecadet.touchscreen](Packages/com.bluecadet.touchscreen) | Multi-touch input module for touchscreen installations |
 | [com.bluecadet.uiblur](Packages/com.bluecadet.uiblur) | Kawase blur effect for UI elements (URP) |
