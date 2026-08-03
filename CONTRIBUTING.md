@@ -23,63 +23,41 @@ Commits that don't match any type land in **Changed**. Scope is optional but hel
 
 ## Releasing a Package
 
-### 1. Bump the version
+Releases are automated with [release-please](https://github.com/googleapis/release-please). You don't bump versions, write changelog entries, or tag anything by hand — just land conventional commits on `main`.
 
-Edit `package.json` for the package you're releasing. Follow [Semantic Versioning](https://semver.org/).
+### 1. Land conventional commits on `main`
 
-### 2. Generate the changelog and determine the version
+release-please reads the commit types in the table above to figure out what changed and how to bump the version (`fix`/`perf` → patch, `feat` → minor, `!`/`BREAKING CHANGE` → major, or minor while on `0.x`).
 
-Run from inside the package directory. git-cliff infers the next version from your commits since the last release tag (`fix` → patch, `feat` → minor, `feat!` / `BREAKING CHANGE` → minor while on 0.x).
+### 2. release-please opens a release PR
 
-**First release** (no prior changelog entries to preserve):
-```sh
-cd Packages/com.bluecadet.spring
-git cliff --bump -o CHANGELOG.md
-```
+The [Release Please](.github/workflows/release-please.yml) workflow runs on every push to `main` and keeps one open release PR per package that has unreleased commits (`release-please-config.json` / `.release-please-manifest.json` at the repo root track per-package versions). The PR:
 
-**Subsequent releases** (preserves existing entries and any manual edits):
-```sh
-cd Packages/com.bluecadet.spring
-git cliff --unreleased --bump --prepend CHANGELOG.md
-```
+- Bumps the package's `package.json` version
+- Adds a new `## [X.Y.Z](compare-url) (date)` section to that package's `CHANGELOG.md`
 
-To see the computed version before generating:
-```sh
-git cliff --bumped-version
-# → com.bluecadet.spring@0.2.0
-```
+Review and edit the PR like any other pull request — it stays open and updates itself as you push more commits, until you merge it.
 
-Review the output and edit if needed.
+### 3. Merging the release PR ships it
 
-### 3. Commit and tag
+When a release PR merges, release-please:
 
-Update `package.json` to match the version git-cliff computed, then:
+1. Tags the merge commit `{full-package-name}@{version}` (e.g. `com.bluecadet.spring@0.2.0`) — no `v` prefix, no shorthand
+2. Creates a GitHub Release for that tag, with the changelog section as the release body
 
-```sh
-git add Packages/com.bluecadet.spring
-git commit -m "chore(spring): release 0.2.0"
-git tag com.bluecadet.spring@0.2.0
-git push origin main com.bluecadet.spring@0.2.0
-```
-
-The tag format is `{full-package-name}@{version}` — no `v` prefix, no shorthand.
-
-If you need to override the computed version (e.g. releasing 1.0.0 intentionally), use `--tag` instead of `--bump`:
-```sh
-git cliff --unreleased --tag 1.0.0 --prepend CHANGELOG.md
-```
-
-### 4. CI takes it from here
-
-Pushing the tag triggers the [Sign and Release](.github/workflows/release.yml) workflow, which:
+That tag push triggers the [Sign and Release](.github/workflows/release.yml) workflow, which:
 
 1. Validates the tag version matches `package.json`
 2. Signs the package with the Unity UPM CLI
 3. Verifies the `.attestation.p7m` signature is present in the archive
-4. Extracts release notes from the committed `CHANGELOG.md`
-5. Creates a GitHub Release with the signed `.tgz` attached
+4. Attaches the signed `.tgz` to the GitHub Release release-please already created
+5. Verifies OpenUPM actually publishes the tagged version (`openupm/openupm-action`)
 
 OpenUPM picks up the release automatically via `trackingMode: githubRelease` and publishes the pre-signed tarball to the registry unchanged.
+
+### Repo setup
+
+The Release Please workflow authenticates with a `RELEASE_PLEASE_TOKEN` repo secret — a personal access token, not the default `GITHUB_TOKEN`. This is required because tags/commits pushed by a workflow run using the default `GITHUB_TOKEN` don't trigger other workflows, so the tag release-please pushes would never fire the Sign and Release workflow above. Set `RELEASE_PLEASE_TOKEN` to a PAT (or GitHub App token) with `contents: write`, `pull-requests: write`, and `issues: write` access to this repo — the last is needed because release-please applies tracking labels (e.g. `autorelease: pending`) to its release PRs.
 
 ---
 
@@ -93,7 +71,6 @@ Packages/com.bluecadet.<name>/
   README.md
   CHANGELOG.md
   <Name>.asmdef
-  cliff.toml
   Scripts/
   Tests/
 ```
@@ -114,19 +91,7 @@ Packages/com.bluecadet.<name>/
 }
 ```
 
-### 2. Add a cliff.toml
-
-Copy from an existing package and update the two package-specific lines:
-
-```toml
-[git]
-tag_pattern = "com\\.bluecadet\\.<name>@(.*)"
-include_paths = ["Packages/com.bluecadet.<name>/**"]
-```
-
-Everything else (body template, commit parsers) stays the same.
-
-### 3. Add a CHANGELOG.md stub
+### 2. Add a CHANGELOG.md stub
 
 ```markdown
 # Changelog
@@ -134,9 +99,20 @@ Everything else (body template, commit parsers) stays the same.
 All notable changes will be documented here.
 ```
 
+release-please prepends new version sections to this file, so no `cliff.toml` is needed for new packages — git-cliff and its per-package `cliff.toml` files are no longer part of the release flow (existing `cliff.toml` files are left in place but unused).
+
+### 3. Register the package with release-please
+
+Add an entry for the package's directory to both root-level files:
+
+- `release-please-config.json`: add a `"Packages/com.bluecadet.<name>": { "component": "com.bluecadet.<name>" }` entry under `"packages"`
+- `.release-please-manifest.json`: add `"Packages/com.bluecadet.<name>": "0.1.0"` matching the version in `package.json`
+
 ### 4. Register with OpenUPM
 
 Submit a PR to [openupm/openupm](https://github.com/openupm/openupm) adding a package listing under `data/packages/`. Set `trackingMode: githubRelease` so OpenUPM fetches the signed `.tgz` from the GitHub Release instead of re-packing from source (which would discard the signature).
+
+This listing PR must be merged **before** the package's first release-please release PR merges. Otherwise the `verify-openupm` job in [Sign and Release](.github/workflows/release.yml) fails on that first release, since OpenUPM has nothing to publish yet — the release itself still succeeds, and signing and tarball attachment are unaffected.
 
 ### 5. Update the root README
 
