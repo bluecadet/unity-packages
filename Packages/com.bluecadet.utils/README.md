@@ -78,7 +78,7 @@ string absolute = env.ResolvePath("some/relative/file.json");
 In tests, build an isolated environment instead of touching `Current`:
 
 ```csharp
-AppEnvironment env = AppEnvironment.ForTest("--machineId=CI", tempDir);
+AppEnvironment env = new AppEnvironment(tempDir, "CI", CommandLineArgs.ParseText("--verbose"));
 ```
 
 ## SettingsFile
@@ -121,7 +121,23 @@ win when they target the same path.
 Other members:
 
 - `Reload()` re-reads and re-merges every tier; `OnReloaded` fires afterward.
-- `Explain("general.debugMode")` returns the effective value at a dotted path and which
-  `SettingsTier` produced it.
+- `TierFor("general.debugMode")` returns the `SettingsTier` that produced the effective value at a
+  dotted path, or null if no tier sets it.
 - `LoadedPaths` lists the file tiers that actually loaded; `PathFor(tier)` returns the on-disk
-  path for a given tier (or a descriptive pseudo-path for `SettingsTier.Cli`, which has no file).
+  path for a file tier, or null for `SettingsTier.Cli`, which has no file.
+
+## Project Settings pane
+
+**Project Settings > Project > Bluecadet** provides two editor-only tools:
+
+- **Simulated Command-Line Args** - a text area editing
+  `ProjectSettings/EditorSimulatedArgs.txt` (autosaved on every edit), the file
+  `CommandLineArgs.FromProcess()` reads while running in the editor. A read-only preview shows
+  how the current text parses, so typos are easy to spot.
+- **Settings File Inspector** - enter a settings base name (default `settings`) to see the merged
+  JSON cascade exactly as `AppEnvironment.Current.SettingsFile<T>(baseName)` would build it, with
+  per-path provenance showing which tier (`Base`/`Machine`/`Local`/`Cli`) won. The merged view is
+  read-only. Below it, **Edit Tier** picks one file tier (`Base`/`Machine`/`Local`) and shows that
+  file's raw JSON: **Save** writes exactly what you typed to that tier's file, and **Delete**
+  removes the file (and its `.meta`). Editing one tier at a time means a key you delete really is
+  deleted from that file, and an active `--set` override is never baked into a saved file.
