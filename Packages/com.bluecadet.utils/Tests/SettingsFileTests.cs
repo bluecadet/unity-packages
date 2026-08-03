@@ -41,7 +41,7 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		private AppEnvironment MakeEnvironment(string argsText = "") =>
-			AppEnvironment.ForTest(argsText, _tempDir, "TEST-MACHINE");
+			new AppEnvironment(_tempDir, "TEST-MACHINE", CommandLineArgs.ParseText(argsText));
 
 		private void WriteBase(string json) => File.WriteAllText(Path.Combine(_tempDir, "settings.json"), json);
 		private void WriteMachine(string json) => File.WriteAllText(Path.Combine(_tempDir, "settings.TEST-MACHINE.json"), json);
@@ -179,41 +179,32 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		[Test]
-		public void Explain_ReportsWinningTierAndValue()
+		public void TierFor_ReportsWinningTier()
 		{
 			WriteBase(@"{ ""general"": { ""debugMode"": false } }");
 			WriteMachine(@"{ ""general"": { ""debugMode"": true } }");
 
 			var settingsFile = MakeEnvironment().SettingsFile<TestSettings>();
 
-			var explanation = settingsFile.Explain("general.debugMode");
-
-			Assert.That(explanation.Tier, Is.EqualTo(SettingsTier.Machine));
-			Assert.That((bool)explanation.Value, Is.True);
+			Assert.That(settingsFile.TierFor("general.debugMode"), Is.EqualTo(SettingsTier.Machine));
 		}
 
 		[Test]
-		public void Explain_CliTierWins_ReportsCliTier()
+		public void TierFor_CliTierWins_ReportsCliTier()
 		{
 			WriteBase(@"{ ""general"": { ""debugMode"": false } }");
 
 			var settingsFile = MakeEnvironment("--set general.debugMode=true").SettingsFile<TestSettings>();
 
-			var explanation = settingsFile.Explain("general.debugMode");
-
-			Assert.That(explanation.Tier, Is.EqualTo(SettingsTier.Cli));
-			Assert.That((bool)explanation.Value, Is.True);
+			Assert.That(settingsFile.TierFor("general.debugMode"), Is.EqualTo(SettingsTier.Cli));
 		}
 
 		[Test]
-		public void Explain_NoTierSetsPath_ReturnsNoneAndNullValue()
+		public void TierFor_NoTierSetsPath_ReturnsNull()
 		{
 			var settingsFile = MakeEnvironment().SettingsFile<TestSettings>();
 
-			var explanation = settingsFile.Explain("general.unknownField");
-
-			Assert.That(explanation.Tier, Is.Null);
-			Assert.That(explanation.Value, Is.Null);
+			Assert.That(settingsFile.TierFor("general.unknownField"), Is.Null);
 		}
 
 		[Test]
@@ -227,11 +218,11 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		[Test]
-		public void PathFor_CliTier_ReturnsNonNullPseudoPath()
+		public void PathFor_CliTier_ReturnsNull()
 		{
 			var settingsFile = MakeEnvironment().SettingsFile<TestSettings>();
 
-			Assert.That(settingsFile.PathFor(SettingsTier.Cli), Is.Not.Null);
+			Assert.That(settingsFile.PathFor(SettingsTier.Cli), Is.Null);
 		}
 	}
 }
