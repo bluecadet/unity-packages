@@ -1,96 +1,172 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using UnityEngine;
 
 namespace Bluecadet.Utils
 {
-	[UnityEngine.ExecuteInEditMode]
-	public class CommandLineArgs : Singleton<CommandLineArgs>
+	/// <summary>
+	/// Immutable, parsed view of command-line style arguments.
+	/// In a build, parses <see cref="Environment.GetCommandLineArgs"/>.
+	/// In the editor, reads a simulated-args text file so command-line
+	/// behavior can be exercised without leaving the editor.
+	/// </summary>
+	public sealed class CommandLineArgs
 	{
-		[SerializeField]
-		[Tooltip("If true, this object persists when loading new scenes.")]
-		private bool _persistAcrossScenes = true;
+		/// <summary>
+		/// Project path (relative to the project root, the parent of <see cref="Application.dataPath"/>)
+		/// to the text file used to simulate command-line arguments while running in the editor.
+		/// Shared with the editor assembly so it can read/write the same file.
+		/// </summary>
+		internal const string SimulatedArgsProjectPath = "ProjectSettings/EditorSimulatedArgs.txt";
 
-#if UNITY_EDITOR
-		[SerializeField]
-		[TextArea(3, 8)]
-		[Tooltip("Editor-only: Simulate CLI flags. Write args exactly as you would on the command line (e.g. '--port 8080 --env=staging --verbose'). Newlines and extra spaces are treated as delimiters. Ignored in builds.")]
-		private string _editorArgs = string.Empty;
-#endif
+		private readonly Dictionary<string, string> _values;
+		private readonly List<KeyValuePair<string, string>> _occurrences;
 
-		private readonly Dictionary<string, string> _parsedArgs = new();
+		/// <summary>
+		/// All parsed arguments, keyed by normalized (lower-case, dash-stripped) name.
+		/// When a name repeats, the last occurrence wins.
+		/// </summary>
+		public IReadOnlyDictionary<string, string> All => _values;
 
-		public IReadOnlyDictionary<string, string> ParsedArgs => _parsedArgs;
+		/// <summary>
+		/// Every parsed (name, value) pair in the order it appeared, including repeats.
+		/// Used by <see cref="SettingsFile{T}"/> to apply every repeatable <c>--set</c> occurrence.
+		/// </summary>
+		internal IReadOnlyList<KeyValuePair<string, string>> Occurrences => _occurrences;
 
-		private void Awake()
+		private CommandLineArgs(List<KeyValuePair<string, string>> occurrences)
 		{
-			if (_persistAcrossScenes && Application.isPlaying)
-				DontDestroyOnLoad(gameObject);
+			_occurrences = occurrences;
+			_values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var occurrence in occurrences)
+				_values[occurrence.Key] = occurrence.Value;
+		}
 
+		/// <summary>
+		/// Builds a <see cref="CommandLineArgs"/> from the current process.
+		/// In builds this parses <see cref="Environment.GetCommandLineArgs"/>; in the editor
+		/// it instead reads the simulated-args file at <see cref="SimulatedArgsProjectPath"/>
+		/// (a missing file yields empty args).
+		/// </summary>
+		public static CommandLineArgs FromProcess()
+		{
 #if UNITY_EDITOR
-			ParseArgs(TokenizeString(_editorArgs));
+			string projectRoot = Path.GetDirectoryName(Application.dataPath);
+			string path = Path.Combine(projectRoot ?? string.Empty, SimulatedArgsProjectPath);
+			string text = File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+			return ParseText(text);
 #else
-			ParseArgs(System.Environment.GetCommandLineArgs());
+			return Parse(Environment.GetCommandLineArgs());
 #endif
 		}
 
-#if UNITY_EDITOR
-		private void OnValidate()
+		/// <summary>
+		/// Parses an argv-style array of tokens (e.g. as returned by <see cref="Environment.GetCommandLineArgs"/>).
+		/// Supports <c>--flag value</c>, <c>--key=value</c>, and bare <c>--flag</c> (which maps to an empty string).
+		/// Names are case-insensitive and leading dashes are normalized; the last occurrence of a
+		/// repeated name wins in <see cref="All"/>.
+		/// </summary>
+		public static CommandLineArgs Parse(params string[] argv)
 		{
-			ParseArgs(TokenizeString(_editorArgs));
-		}
-#endif
+			var occurrences = new List<KeyValuePair<string, string>>();
+			if (argv == null)
+				return new CommandLineArgs(occurrences);
 
-		private void ParseArgs(string[] args)
-		{
-			_parsedArgs.Clear();
-
-			for (int i = 0; i < args.Length; i++)
+			for (int i = 0; i < argv.Length; i++)
 			{
-				string arg = args[i];
-
-				if (!arg.StartsWith("-"))
+				string token = argv[i];
+				if (string.IsNullOrEmpty(token) || !token.StartsWith("-", StringComparison.Ordinal))
 					continue;
 
-				int equalsIndex = arg.IndexOf('=');
+				int equalsIndex = token.IndexOf('=');
 				if (equalsIndex >= 0)
 				{
-					string key = arg.Substring(0, equalsIndex);
-					string value = arg.Substring(equalsIndex + 1);
-					_parsedArgs[key] = value;
+					string name = NormalizeName(token.Substring(0, equalsIndex));
+					string value = token.Substring(equalsIndex + 1);
+					occurrences.Add(new KeyValuePair<string, string>(name, value));
 					continue;
 				}
 
-				if (i + 1 < args.Length && !args[i + 1].StartsWith("-"))
+				string flagName = NormalizeName(token);
+				bool nextIsValue = i + 1 < argv.Length
+					&& !string.IsNullOrEmpty(argv[i + 1])
+					&& !argv[i + 1].StartsWith("-", StringComparison.Ordinal);
+
+				if (nextIsValue)
 				{
-					_parsedArgs[arg] = args[i + 1];
+					occurrences.Add(new KeyValuePair<string, string>(flagName, argv[i + 1]));
 					i++;
 				}
 				else
 				{
-					_parsedArgs[arg] = string.Empty;
+					occurrences.Add(new KeyValuePair<string, string>(flagName, string.Empty));
 				}
 			}
+
+			return new CommandLineArgs(occurrences);
 		}
 
-		private static string[] TokenizeString(string input)
+		/// <summary>
+		/// Tokenizes <paramref name="text"/> on whitespace, honoring double-quoted strings
+		/// (so a quoted value may contain spaces), then parses the resulting tokens.
+		/// </summary>
+		public static CommandLineArgs ParseText(string text)
 		{
-			if (string.IsNullOrWhiteSpace(input))
+			return Parse(Tokenize(text));
+		}
+
+		/// <summary>Returns true if a flag with the given name was parsed.</summary>
+		public bool HasFlag(string name) => _values.ContainsKey(NormalizeName(name));
+
+		/// <summary>Returns the value for the given flag name, or <paramref name="fallback"/> if not present.</summary>
+		public string Get(string name, string fallback = null) =>
+			_values.TryGetValue(NormalizeName(name), out string value) ? value : fallback;
+
+		/// <summary>Attempts to get the value for the given flag name.</summary>
+		public bool TryGet(string name, out string value) => _values.TryGetValue(NormalizeName(name), out value);
+
+		private static string NormalizeName(string name) => (name ?? string.Empty).TrimStart('-').ToLowerInvariant();
+
+		private static string[] Tokenize(string text)
+		{
+			if (string.IsNullOrWhiteSpace(text))
 				return Array.Empty<string>();
 
-			return input.Split(new char[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-		}
+			var tokens = new List<string>();
+			var current = new StringBuilder();
+			bool inQuotes = false;
+			bool hasToken = false;
 
-		public bool HasFlag(string flag) => _parsedArgs.ContainsKey(flag);
+			foreach (char c in text)
+			{
+				if (c == '"')
+				{
+					inQuotes = !inQuotes;
+					hasToken = true;
+					continue;
+				}
 
-		public string GetArg(string key, string defaultValue = null)
-		{
-			return _parsedArgs.TryGetValue(key, out string value) ? value : defaultValue;
-		}
+				if (!inQuotes && char.IsWhiteSpace(c))
+				{
+					if (hasToken)
+					{
+						tokens.Add(current.ToString());
+						current.Clear();
+						hasToken = false;
+					}
+					continue;
+				}
 
-		public bool TryGetArg(string key, out string value)
-		{
-			return _parsedArgs.TryGetValue(key, out value);
+				current.Append(c);
+				hasToken = true;
+			}
+
+			if (hasToken)
+				tokens.Add(current.ToString());
+
+			return tokens.ToArray();
 		}
 	}
 }
