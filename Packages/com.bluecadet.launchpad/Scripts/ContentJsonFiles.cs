@@ -15,12 +15,17 @@ namespace Bluecadet.Launchpad
 		/// <summary>
 		/// Parses each *.json file among <paramref name="files"/> (bare JSON
 		/// array, or a {"data":[...]} envelope) and yields every element in
-		/// file order. Non-.json files are ignored. Read failures,
-		/// Newtonsoft.Json.JsonException on malformed JSON, and
-		/// InvalidDataException if a "data" property exists but isn't a JSON
-		/// array all propagate — a mapper built on this helper should let
-		/// them through so IContentMapper's "throw aborts the version"
-		/// contract applies, rather than silently dropping content.
+		/// file order. Non-.json files are ignored. A *.json file that parses
+		/// to a bare JSON object with no "data" array (e.g. a singleton
+		/// config file) is silently skipped too — a mapper needs to parse
+		/// such a file itself (JObject.Parse) and emit its own ContentItem
+		/// (see "Multiple content models" > "Singleton models" in the
+		/// package README). Read failures, Newtonsoft.Json.JsonException on
+		/// malformed JSON, and InvalidDataException if a "data" property
+		/// exists but isn't a JSON array all propagate — a mapper built on
+		/// this helper should let them through so IContentMapper's "throw
+		/// aborts the version" contract applies, rather than silently
+		/// dropping content.
 		/// </summary>
 		public static IEnumerable<JToken> ParseItems(IEnumerable<string> files)
 		{
