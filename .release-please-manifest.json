@@ -1,0 +1,8 @@
+{
+  "Packages/com.bluecadet.hap": "1.1.0",
+  "Packages/com.bluecadet.spring": "1.0.1",
+  "Packages/com.bluecadet.touchscreen": "1.0.1",
+  "Packages/com.bluecadet.uiblur": "1.0.1",
+  "Packages/com.bluecadet.uiblur-hdrp": "1.0.1",
+  "Packages/com.bluecadet.utils": "1.2.0"
+}
