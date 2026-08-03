@@ -1,9 +1,7 @@
 {
     "name": "Bluecadet.Utils",
     "rootNamespace": "Bluecadet.Utils",
-    "references": [
-        "Unity.InputSystem"
-    ],
+    "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
