@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
+using UnityEngine.Rendering;
 using UnityEngine.TestTools;
 
 namespace Bluecadet.Hap.Tests
@@ -99,6 +101,39 @@ namespace Bluecadet.Hap.Tests
                     Assert.That(seen.Add(ptr), Is.True, $"slot {slot} texture {t} aliases another buffer");
                 }
             }
+        }
+
+        [Test]
+        public void AlphaTexture_IsSampledLinearly()
+        {
+            var ring = NewRing(YCoCg, Rgtc1);
+
+            for (int slot = 0; slot < ring.SlotCount; slot++)
+            {
+                var alpha = ring.GetTexture(slot, 1);
+
+                // Hap Q Alpha's alpha is coverage, not colour. Read as sRGB data in a linear
+                // project, its ramp comes back gamma-warped.
+                Assert.That(alpha.isDataSRGB, Is.False,
+                    $"slot {slot}: the alpha texture's data is treated as sRGB");
+                Assert.That(GraphicsFormatUtility.IsSRGBFormat(alpha.graphicsFormat), Is.False,
+                    $"slot {slot}: the alpha texture is sampled as sRGB ({alpha.graphicsFormat})");
+                Assert.That(alpha.graphicsFormat, Is.EqualTo(GraphicsFormat.R_BC4_UNorm));
+            }
+        }
+
+        [Test]
+        public void ColorTexture_KeepsSrgbSampling()
+        {
+            var ring = NewRing(YCoCg, Rgtc1);
+            var color = ring.GetTexture(0, 0);
+
+            // Unchanged from before the alpha fix: colour data is still sRGB.
+            Assert.That(color.isDataSRGB, Is.True, "colour textures must keep sRGB sampling");
+
+            bool expectSrgbFormat = QualitySettings.activeColorSpace == ColorSpace.Linear;
+            Assert.That(GraphicsFormatUtility.IsSRGBFormat(color.graphicsFormat), Is.EqualTo(expectSrgbFormat),
+                $"colour texture is {color.graphicsFormat} in {QualitySettings.activeColorSpace} color space");
         }
 
         [Test]
