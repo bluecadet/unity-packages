@@ -5,6 +5,14 @@
 //! `data` is an empty slice; a missing/unreadable file, a failed `fstat`,
 //! or a failed `mmap` are all reported as errors.
 //!
+//! Paging: the whole file is mapped, so every byte the decoder touches is a
+//! page fault against the file. Two advisory hints keep those faults from
+//! serializing into single-page reads on a cold page cache -- a
+//! sequential-access hint at open time, and `prefetch`, which asks the
+//! kernel to fault a specific byte range in ahead of use (the decode loop
+//! points it at the next frame's sample). Both are pure hints: a failure
+//! costs performance, never correctness, so both swallow it.
+//!
 //! Design notes:
 //!   * Failures are reported via a Zig error union.
 //!   * `path` is only read during `init`; the mapping outlives it, so the
@@ -50,6 +58,58 @@ pub const MmapReader = struct {
         }
 
         self.* = .{};
+    }
+
+    /// Ask the kernel to fault `range` -- a sub-slice of `data` -- in ahead
+    /// of the first dereference. Purely advisory: an unmapped or oversized
+    /// range, or a kernel that refuses the hint, is a silent no-op, and the
+    /// caller's next read faults the pages in the ordinary way.
+    pub fn prefetch(self: *const MmapReader, range: []const u8) void {
+        self.prefetchChecked(range) catch {};
+    }
+
+    /// Why a `prefetch` did nothing. Not public API -- `prefetch` swallows
+    /// these -- but the suite asserts on them, so a hint that has silently
+    /// stopped reaching the kernel fails a test instead of just getting
+    /// slower.
+    pub const PrefetchError = error{
+        /// `range` is not contained by this reader's mapping.
+        OutOfRange,
+        /// The kernel rejected the hint.
+        HintFailed,
+    };
+
+    fn prefetchChecked(self: *const MmapReader, range: []const u8) PrefetchError!void {
+        if (range.len == 0 or range.len > self.data.len) return PrefetchError.OutOfRange;
+
+        const map_start = @intFromPtr(self.data.ptr);
+        const start = @intFromPtr(range.ptr);
+        if (start < map_start or start - map_start > self.data.len - range.len) {
+            return PrefetchError.OutOfRange;
+        }
+
+        // Both APIs below take page-granular ranges and quietly do nothing
+        // (POSIX) or fail (Windows) otherwise, so widen to whole pages:
+        // back to the page holding the first byte, forward past the page
+        // holding the last. Rounding the end up cannot leave the mapping --
+        // mmap/MapViewOfFile always map whole pages, so the mapping's last
+        // page is fully addressable even when the file ends mid-page.
+        const page = std.heap.pageSize();
+        const aligned_start = std.mem.alignBackward(usize, start, page);
+        const aligned_len = std.mem.alignForward(usize, start + range.len, page) - aligned_start;
+
+        if (builtin.os.tag == .windows) {
+            var entries: [1]MemoryRangeEntry = .{.{
+                .VirtualAddress = @ptrFromInt(aligned_start),
+                .NumberOfBytes = aligned_len,
+            }};
+            if (PrefetchVirtualMemory(GetCurrentProcess(), 1, &entries, 0) == 0) {
+                return PrefetchError.HintFailed;
+            }
+        } else {
+            const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(aligned_start);
+            posix.madvise(ptr, aligned_len, posix.MADV.WILLNEED) catch return PrefetchError.HintFailed;
+        }
     }
 
     fn initPosix(path: []const u8) InitError!MmapReader {
@@ -129,7 +189,7 @@ pub const MmapReader = struct {
             FILE_SHARE_READ,
             null,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
             null,
         );
         if (handle == windows.INVALID_HANDLE_VALUE) return InitError.OpenFailed;
@@ -166,8 +226,22 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_READ: u32 = 0x01;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+/// Cache-manager hint that the file is read front to back. There is no
+/// POSIX equivalent here: `F_RDAHEAD`/`POSIX_FADV_SEQUENTIAL` are state on
+/// the file descriptor, and `initPosix` closes its fd as soon as the
+/// mapping exists, so a POSIX version of this hint would be discarded
+/// before it could affect a single page fault. This flag survives because
+/// it is set on the file object at `CreateFileA` time and the mapping
+/// holds a reference to that object, not to a descriptor that gets closed.
+const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const PAGE_READONLY: u32 = 0x02;
 const FILE_MAP_READ: u32 = 0x0004;
+
+/// WIN32_MEMORY_RANGE_ENTRY: one address range for PrefetchVirtualMemory.
+const MemoryRangeEntry = extern struct {
+    VirtualAddress: ?*anyopaque,
+    NumberOfBytes: usize,
+};
 
 extern "kernel32" fn CreateFileA(
     lpFileName: [*:0]const u8,
@@ -209,6 +283,17 @@ extern "kernel32" fn CloseHandle(
     hObject: ?*anyopaque,
 ) callconv(.winapi) c_int;
 
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) ?*anyopaque;
+
+/// Windows 8 / Server 2012 and newer; the oldest Windows the Unity versions
+/// this package supports run on, so no runtime GetProcAddress dance.
+extern "kernel32" fn PrefetchVirtualMemory(
+    hProcess: ?*anyopaque,
+    NumberOfEntries: usize,
+    VirtualAddresses: [*]MemoryRangeEntry,
+    Flags: u32,
+) callconv(.winapi) c_int;
+
 const repo_root_hap1_mov = "tests/fixtures/hap1.mov";
 
 test "init maps a real fixture file and reads its MP4 box header" {
@@ -224,6 +309,46 @@ test "init maps a real fixture file and reads its MP4 box header" {
 test "init fails for a nonexistent file" {
     const result = MmapReader.init("tests/fixtures/does_not_exist.mov");
     try std.testing.expectError(MmapReader.InitError.OpenFailed, result);
+}
+
+test "prefetch of a mapped range reaches the kernel" {
+    var reader = try MmapReader.init(repo_root_hap1_mov);
+    defer reader.deinit();
+
+    // The checked form is what the assertion is for: `prefetch` itself
+    // reports nothing, so only this can tell "the kernel took the hint"
+    // apart from "the call has quietly stopped being made".
+    try reader.prefetchChecked(reader.data[0..1]);
+
+    // An unaligned, mid-file range is the shape the decode path passes.
+    const middle = reader.data.len / 2;
+    try reader.prefetchChecked(reader.data[middle - 1 ..][0..3]);
+
+    // The last byte: the aligned length runs past end-of-file into the
+    // mapping's final page, which must still be a legal range to hint.
+    try reader.prefetchChecked(reader.data[reader.data.len - 1 ..]);
+}
+
+test "prefetch rejects ranges outside the mapping" {
+    var reader = try MmapReader.init(repo_root_hap1_mov);
+    defer reader.deinit();
+
+    var stack_byte: [1]u8 = .{0};
+    try std.testing.expectError(
+        MmapReader.PrefetchError.OutOfRange,
+        reader.prefetchChecked(&stack_byte),
+    );
+    try std.testing.expectError(
+        MmapReader.PrefetchError.OutOfRange,
+        reader.prefetchChecked(reader.data[0..0]),
+    );
+
+    var empty: MmapReader = .{};
+    try std.testing.expectError(
+        MmapReader.PrefetchError.OutOfRange,
+        empty.prefetchChecked(reader.data[0..1]),
+    );
+    empty.prefetch(reader.data[0..1]); // swallowed, no crash
 }
 
 test "deinit on a zero-value reader is a no-op" {

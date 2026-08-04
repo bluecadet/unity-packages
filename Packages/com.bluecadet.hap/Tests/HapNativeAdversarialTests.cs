@@ -151,6 +151,71 @@ namespace Bluecadet.Hap.Tests
             Assert.That(HapNative.DecodeTexture(_handle, 0, 0, color.Ptr, color.Size), Is.EqualTo(HapError.Ok));
         }
 
+        // ── Prefetch hints ───────────────────────────────────────────────────
+        //
+        // hap_prefetch_frame only advises the OS about paging, so it has no
+        // observable result to assert on — its effect shows up as fewer major
+        // faults on a cold page cache, which only the benchmark can measure.
+        // What these cover is that it is harmless: no index can take the process
+        // down, and decoding after any amount of hinting is still byte-exact.
+
+        [Test]
+        public void PrefetchFrame_AnyIndexOrNullHandle_DoesNotThrow()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            int frameCount = HapNative.hap_get_frame_count(_handle);
+
+            Assert.DoesNotThrow(() =>
+            {
+                HapNative.hap_prefetch_frame(IntPtr.Zero, 0);
+                HapNative.hap_prefetch_frame(_handle, -1);
+                HapNative.hap_prefetch_frame(_handle, int.MinValue);
+                HapNative.hap_prefetch_frame(_handle, frameCount);
+                HapNative.hap_prefetch_frame(_handle, int.MaxValue);
+                for (int frame = 0; frame < frameCount; frame++)
+                    HapNative.hap_prefetch_frame(_handle, frame);
+            });
+        }
+
+        [Test]
+        public void PrefetchFrame_BeforeDecode_LeavesPixelsUnchanged()
+        {
+            string goldenPath = Path.Combine(HapTestFixtures.Dir, "hap1_golden.bin");
+            HapTestFixtures.Require(goldenPath);
+            OpenFixture(HapTestFixtures.Hap1);
+
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            int frameCount = HapNative.hap_get_frame_count(_handle);
+
+            HapNative.hap_prefetch_frame(_handle, 0);
+            HapNative.hap_prefetch_frame(_handle, frameCount - 1);
+            HapNative.hap_prefetch_frame(_handle, frameCount + 100);
+
+            Assert.That(HapTestFixtures.DecodeToBytes(_handle, 0, 0, size),
+                Is.EqualTo(File.ReadAllBytes(goldenPath)));
+        }
+
+        [Test]
+        public void PrefetchFrame_BetweenAQAlphaTexturePair_LeavesBothCorrect()
+        {
+            HapTestFixtures.Require(HapTestFixtures.HapM);
+            HapTestFixtures.Require(HapTestFixtures.HapMGoldenTex0);
+            HapTestFixtures.Require(HapTestFixtures.HapMGoldenTex1);
+            Assert.That(HapNative.Open(HapTestFixtures.HapM, out _handle), Is.EqualTo(HapError.Ok));
+
+            int colorSize = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            int alphaSize = HapNative.hap_get_texture_buffer_size(_handle, 1);
+
+            byte[] color = HapTestFixtures.DecodeToBytes(_handle, 0, 0, colorSize);
+            // The two textures of a frame share one demuxed sample; a hint landing
+            // between them must not disturb it.
+            HapNative.hap_prefetch_frame(_handle, 1);
+            byte[] alpha = HapTestFixtures.DecodeToBytes(_handle, 0, 1, alphaSize);
+
+            Assert.That(color, Is.EqualTo(File.ReadAllBytes(HapTestFixtures.HapMGoldenTex0)));
+            Assert.That(alpha, Is.EqualTo(File.ReadAllBytes(HapTestFixtures.HapMGoldenTex1)));
+        }
+
         // ── Multiple handles ─────────────────────────────────────────────────
 
         [Test]

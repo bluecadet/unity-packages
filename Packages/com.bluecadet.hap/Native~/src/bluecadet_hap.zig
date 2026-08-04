@@ -439,6 +439,22 @@ pub export fn hap_decode_texture(
     return code(.ok);
 }
 
+/// Ask the OS to fault in the bytes of frame `frame_index` ahead of a
+/// decode of it. Advisory and best-effort: a null handle, an out-of-range
+/// index, or a kernel that refuses the hint all leave this a no-op, and
+/// nothing about a later decode changes either way -- only how much of it
+/// is spent waiting on the disk.
+///
+/// Deliberately looks the sample up through the demuxer rather than the
+/// handle's one-sample cache: hinting a frame must not evict the sample a
+/// Hap Q Alpha frame's two `hap_decode_texture` calls share.
+pub export fn hap_prefetch_frame(handle: ?*Handle, frame_index: i32) void {
+    const h = handle orelse return;
+    if (frame_index < 0) return;
+    const data = h.demux.sampleData(&h.reader, @intCast(frame_index)) orelse return;
+    h.reader.prefetch(data);
+}
+
 // -----------------------------------------------------------------------
 // Threading.
 // -----------------------------------------------------------------------

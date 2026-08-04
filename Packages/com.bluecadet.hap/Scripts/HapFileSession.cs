@@ -298,6 +298,15 @@ namespace Bluecadet.Hap
                 {
                     consecutiveErrors = 0;
                     ring.CommitWrite(slot, target);
+
+                    // Warm the page cache for the frame this thread will most likely decode
+                    // next, so its bytes are resident before the decoder dereferences them.
+                    // The whole file is memory-mapped, so on a cold cache every frame is
+                    // otherwise a run of major faults taken here, on the decode thread. This
+                    // is a hint about pages only: how far ahead the ring decodes is unchanged.
+                    if (frameCount > 1)
+                        HapNative.hap_prefetch_frame(handle, (target + dir + frameCount) % frameCount);
+
                     scheduler.OnDecoded(target, request.IsPrefetch, dir);
                 }
             }
