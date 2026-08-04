@@ -12,10 +12,10 @@ namespace Bluecadet.Hap.Tests
         public void Next_InitialState_DecodesRequestedFrame()
         {
             var s = new DecodeScheduler(FrameCount);
-            var (target, isPrefetch, shouldBlock) = s.Next(5, 1);
-            Assert.That(target, Is.EqualTo(5));
-            Assert.That(isPrefetch, Is.False);
-            Assert.That(shouldBlock, Is.False);
+            var request = s.Next(5, 1);
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Decode));
+            Assert.That(request.Frame, Is.EqualTo(5));
+            Assert.That(request.IsPrefetch, Is.False);
         }
 
         [Test]
@@ -25,23 +25,23 @@ namespace Bluecadet.Hap.Tests
             s.Next(0, 1);                // decide to decode 0
             s.OnDecoded(0, false, 1);    // decode done
 
-            var (target, isPrefetch, shouldBlock) = s.Next(0, 1);  // main still wants 0
-            Assert.That(target, Is.EqualTo(1));
-            Assert.That(isPrefetch, Is.True);
-            Assert.That(shouldBlock, Is.False);
+            var request = s.Next(0, 1);  // main still wants 0
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Prefetch));
+            Assert.That(request.Frame, Is.EqualTo(1));
+            Assert.That(request.IsPrefetch, Is.True);
         }
 
         [Test]
-        public void Next_AfterPrefetch_Blocks()
+        public void Next_AfterPrefetch_Waits()
         {
             var s = new DecodeScheduler(FrameCount);
             s.Next(0, 1);
             s.OnDecoded(0, false, 1);
-            var (prefetchTarget, _, _) = s.Next(0, 1);
-            s.OnDecoded(prefetchTarget, true, 1);
+            var prefetch = s.Next(0, 1);
+            s.OnDecoded(prefetch.Frame, true, 1);
 
-            var (target, isPrefetch, shouldBlock) = s.Next(0, 1);  // main still wants 0
-            Assert.That(shouldBlock, Is.True);
+            var request = s.Next(0, 1);  // main still wants 0
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Wait));
         }
 
         [Test]
@@ -53,9 +53,8 @@ namespace Bluecadet.Hap.Tests
             s.Next(0, 1);                  // prefetch decision
             s.OnDecoded(1, true, 1);       // prefetch frame 1
 
-            var (target, isPrefetch, shouldBlock) = s.Next(1, 1);  // main now requests 1
-            Assert.That(target, Is.EqualTo(-1));   // already in buffer
-            Assert.That(shouldBlock, Is.False);
+            var request = s.Next(1, 1);    // main now requests 1
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Skip));  // already in buffer
         }
 
         [Test]
@@ -68,9 +67,9 @@ namespace Bluecadet.Hap.Tests
             s.OnDecoded(1, true, 1);
             s.Next(1, 1);  // already buffered — sets lastExplicit=1, prefetchDone=false
 
-            var (target, isPrefetch, _) = s.Next(1, 1);  // should now prefetch frame 2
-            Assert.That(target, Is.EqualTo(2));
-            Assert.That(isPrefetch, Is.True);
+            var request = s.Next(1, 1);  // should now prefetch frame 2
+            Assert.That(request.Frame, Is.EqualTo(2));
+            Assert.That(request.IsPrefetch, Is.True);
         }
 
         [Test]
@@ -81,13 +80,14 @@ namespace Bluecadet.Hap.Tests
             s.OnDecoded(0, false, 1);  // decoded 0, lastExplicit=0
 
             // Seek to frame 15 (non-sequential)
-            var (target, isPrefetch, shouldBlock) = s.Next(15, 1);
-            Assert.That(target, Is.EqualTo(15));
-            Assert.That(isPrefetch, Is.False);
+            var seek = s.Next(15, 1);
+            Assert.That(seek.Kind, Is.EqualTo(DecodeRequestKind.Decode));
+            Assert.That(seek.Frame, Is.EqualTo(15));
+            Assert.That(seek.IsPrefetch, Is.False);
             s.OnDecoded(15, false, 1);  // wasSeq = false → prefetchDone = true
 
-            var (t2, _, block2) = s.Next(15, 1);  // no prefetch because seek
-            Assert.That(block2, Is.True);
+            var request = s.Next(15, 1);  // no prefetch because seek
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Wait));
         }
 
         [Test]
@@ -97,9 +97,9 @@ namespace Bluecadet.Hap.Tests
             s.Next(10, -1);
             s.OnDecoded(10, false, -1);
 
-            var (target, isPrefetch, _) = s.Next(10, -1);
-            Assert.That(target, Is.EqualTo(9));  // previous frame in reverse
-            Assert.That(isPrefetch, Is.True);
+            var request = s.Next(10, -1);
+            Assert.That(request.Frame, Is.EqualTo(9));  // previous frame in reverse
+            Assert.That(request.IsPrefetch, Is.True);
         }
 
         [Test]
@@ -109,9 +109,9 @@ namespace Bluecadet.Hap.Tests
             s.Next(FrameCount - 1, 1);
             s.OnDecoded(FrameCount - 1, false, 1);
 
-            var (target, isPrefetch, _) = s.Next(FrameCount - 1, 1);
-            Assert.That(target, Is.EqualTo(0));  // wraps to first frame
-            Assert.That(isPrefetch, Is.True);
+            var request = s.Next(FrameCount - 1, 1);
+            Assert.That(request.Frame, Is.EqualTo(0));  // wraps to first frame
+            Assert.That(request.IsPrefetch, Is.True);
         }
 
         [Test]
@@ -133,8 +133,8 @@ namespace Bluecadet.Hap.Tests
             s.Next(0, 1);
             s.OnDecoded(0, false, 1);
 
-            var (target, isPrefetch, shouldBlock) = s.Next(0, 1);
-            Assert.That(shouldBlock, Is.True);  // nothing to prefetch; block
+            var request = s.Next(0, 1);
+            Assert.That(request.Kind, Is.EqualTo(DecodeRequestKind.Wait));  // nothing to prefetch
         }
     }
 }

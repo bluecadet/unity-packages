@@ -63,8 +63,11 @@ namespace Bluecadet.Hap
         Thread _decodeThread;
         volatile bool _decodeRunning;
         volatile bool _handleValid;
-        volatile int _decodeTargetFrame = -1;
-        volatile int _decodeDirection = 1;
+
+        /// <summary>The frame and direction the main thread last asked for. Guarded by <see cref="_decodeLock"/>.</summary>
+        int _decodeTargetFrame = -1;
+        int _decodeDirection = 1;
+
         HapTextureRing _ring;
         readonly object _decodeLock = new();
 
@@ -241,36 +244,20 @@ namespace Bluecadet.Hap
 
             while (_decodeRunning)
             {
-                int target;
-                bool isPrefetch;
+                DecodeRequest request;
                 int dir;
 
                 lock (_decodeLock)
-                {
-                    dir = _decodeDirection;
-                    var (t, pf, block) = scheduler.Next(_decodeTargetFrame, dir);
+                    request = WaitForRequest(scheduler, out dir);
 
-                    if (block)
-                    {
-                        // Block until the main thread requests a new frame or signals exit.
-                        // 100ms safety timeout guards against Pulse being missed during a
-                        // teardown race.
-                        while (_decodeRunning && _decodeTargetFrame == scheduler.LastExplicit)
-                            Monitor.Wait(_decodeLock, 100);
+                // Only reached with nothing left to decode because the session is stopping.
+                if (request.Kind == DecodeRequestKind.Wait) break;
+                if (request.Kind == DecodeRequestKind.Skip) continue;
 
-                        if (!_decodeRunning) break;
-                        dir = _decodeDirection;
-                        (t, pf, _) = scheduler.Next(_decodeTargetFrame, dir);
-                    }
-
-                    target     = t;
-                    isPrefetch = pf;
-                }
-
-                if (target == -1) continue;
                 if (ring == null) break;
                 if (!_handleValid) break;
 
+                int target = request.Frame;
                 int slot = ring.BeginWrite();
                 HapError result = HapError.Ok;
 
@@ -303,8 +290,32 @@ namespace Bluecadet.Hap
                 {
                     consecutiveErrors = 0;
                     ring.CommitWrite(slot, target);
-                    scheduler.OnDecoded(target, isPrefetch, dir);
+                    scheduler.OnDecoded(target, request.IsPrefetch, dir);
                 }
+            }
+        }
+
+        /// <summary>
+        /// The scheduler's next instruction, parking the thread while it has nothing to decode.
+        /// Call with <see cref="_decodeLock"/> held. Only returns
+        /// <see cref="DecodeRequestKind.Wait"/> when the session is shutting down, so the caller
+        /// treats that as "stop" rather than "block".
+        /// </summary>
+        DecodeRequest WaitForRequest(DecodeScheduler scheduler, out int dir)
+        {
+            while (true)
+            {
+                dir = _decodeDirection;
+                var request = scheduler.Next(_decodeTargetFrame, dir);
+                if (request.Kind != DecodeRequestKind.Wait) return request;
+                if (!_decodeRunning) return DecodeRequest.Wait;
+
+                // Block until the main thread requests a new frame or signals exit. The 100ms
+                // safety timeout guards against a Pulse missed during a teardown race.
+                while (_decodeRunning && _decodeTargetFrame == scheduler.LastExplicit)
+                    Monitor.Wait(_decodeLock, 100);
+
+                if (!_decodeRunning) return DecodeRequest.Wait;
             }
         }
 
