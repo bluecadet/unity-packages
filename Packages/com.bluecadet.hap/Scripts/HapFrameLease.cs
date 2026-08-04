@@ -1,35 +1,53 @@
 using System;
-using Unity.Collections;
+using UnityEngine;
 
 namespace Bluecadet.Hap
 {
     /// <summary>
-    /// A scoped lease on a decoded frame in the ring buffer.
-    /// Holds the frame data while the caller uses it and releases the ring-buffer
-    /// pin automatically when disposed, preventing the decode thread from overwriting
-    /// the slot while the main thread is reading it.
+    /// A scoped lease on the newest decoded frame. Holds the ring slot pinned so the decode
+    /// thread cannot decode into its textures while the main thread is uploading and drawing
+    /// from them, and releases the pin when disposed.
     ///
-    /// Obtain via <see cref="HapFrameRingBuffer.TryAcquire"/>.
-    /// Always use in a <c>using</c> block or call <see cref="Dispose"/> explicitly.
+    /// Obtain via <see cref="HapTextureRing.TryAcquire"/> — the only thing that hands one out,
+    /// and only along with a ring — and always use it in a <c>using</c> block.
     /// </summary>
-    internal struct HapFrameLease : IDisposable
+    internal readonly struct HapFrameLease : IDisposable
     {
         /// <summary>Frame index of the decoded frame.</summary>
         public readonly int FrameIndex;
 
-        /// <summary>Raw decoded texture data (DXT/BC7 bytes).</summary>
-        public readonly NativeArray<byte> Data;
+        /// <summary>Ring slot the frame lives in.</summary>
+        public readonly int Slot;
 
-        readonly HapFrameRingBuffer _buffer;
+        readonly HapTextureRing _ring;
 
-        internal HapFrameLease(int frameIndex, NativeArray<byte> data, HapFrameRingBuffer buffer)
+        internal HapFrameLease(int frameIndex, int slot, HapTextureRing ring)
         {
             FrameIndex = frameIndex;
-            Data = data;
-            _buffer = buffer;
+            Slot = slot;
+            _ring = ring;
         }
 
-        /// <summary>Release the ring-buffer pin. Safe to call on a default struct (no-op).</summary>
-        public void Dispose() => _buffer?.ClearPin();
+        /// <summary>The frame's colour texture (block-compressed, still V-flipped).</summary>
+        public Texture2D ColorTexture => _ring.GetTexture(Slot, _ring.Variant.ColorIndex);
+
+        /// <summary>The frame's alpha texture for Hap Q Alpha, or null for single-texture formats.</summary>
+        public Texture2D AlphaTexture
+        {
+            get
+            {
+                var variant = _ring.Variant;
+                return variant.HasAlphaTexture ? _ring.GetTexture(Slot, variant.AlphaIndex) : null;
+            }
+        }
+
+        /// <summary>Upload the frame's decoded bytes to the GPU.</summary>
+        public void Apply() => _ring.Apply(Slot);
+
+        /// <summary>Record that the frame's textures were handed to the GPU this frame.</summary>
+        public void MarkUploaded() => _ring.MarkUploaded(Slot);
+
+        /// <summary>Release the slot pin.</summary>
+        public void Dispose() => _ring.ClearPin();
     }
 }

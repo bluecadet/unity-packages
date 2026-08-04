@@ -113,6 +113,39 @@ namespace Bluecadet.Hap
         public int Height      => _session?.Height ?? 0;
         public string FilePath => filePath;
 
+        /// <summary>
+        /// How many threads decompress a chunked frame's chunks in parallel, including the
+        /// decode thread itself (so 1 means "no helper threads"). Counts above the plugin's
+        /// worker pool size are clamped to it.
+        ///
+        /// This is a process-wide setting shared by every <see cref="HapPlayer"/>, not a
+        /// per-player one: the last assignment wins and applies to every video currently
+        /// playing, from its next chunked frame onwards. Reads back 0 until it is assigned,
+        /// meaning "the plugin's default", which is one thread per hardware thread minus the
+        /// ones the engine needs.
+        /// </summary>
+        public static int DecodeThreadCount
+        {
+            get => s_decodeThreadCount;
+            set
+            {
+                if (value < 1)
+                {
+                    Debug.LogError($"[HapPlayer] DecodeThreadCount must be at least 1, got {value}");
+                    return;
+                }
+                var error = HapNative.SetThreadCount(value);
+                if (error != HapError.Ok)
+                {
+                    Debug.LogError($"[HapPlayer] Failed to set decode thread count to {value}: {error}");
+                    return;
+                }
+                s_decodeThreadCount = value;
+            }
+        }
+
+        static int s_decodeThreadCount;
+
         public bool Loop
         {
             get => loop;
@@ -163,11 +196,7 @@ namespace Bluecadet.Hap
             set
             {
                 _playbackClock.Time = Mathf.Clamp(value, 0f, Duration);
-                if (FrameCount > 0)
-                {
-                    int dir = playbackSpeed > 0f ? 1 : -1;
-                    _session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), dir);
-                }
+                SeekDecodeToClock();
             }
         }
 
@@ -226,11 +255,23 @@ namespace Bluecadet.Hap
 
         void CompleteOpen()
         {
-            int uploaderCount = Mathf.Max(2, QualitySettings.maxQueuedFrames + 1);
-            _outputPipeline = new HapOutputPipeline(_session.Width, _session.Height, _session.Format, uploaderCount);
+            // The GPU can be up to maxQueuedFrames behind the main thread, so a texture must
+            // not be decoded into again until that many later frames have been uploaded.
+            int retireDepth = Mathf.Max(1, QualitySettings.maxQueuedFrames);
+            _outputPipeline = new HapOutputPipeline(_session.Width, _session.Height, _session.Textures, retireDepth);
+
+            // The ring reports its textures too small for the decoder's output — every decode
+            // would fail, so stop here rather than spinning on errors. It has already logged why.
+            if (!_outputPipeline.Ring.IsValid)
+            {
+                _pendingPlay = false;
+                CloseInternal();
+                return;
+            }
+
             _playbackClock.Time = 0f;
             _openedFrame = UnityEngine.Time.frameCount;
-            _session.StartDecoding(0);
+            _session.StartDecoding(_outputPipeline.Ring, 0);
 
             Opened?.Invoke();
             if (_pendingPlay)
@@ -243,9 +284,20 @@ namespace Bluecadet.Hap
         void CloseInternal()
         {
             _playing = false;
-            _outputPipeline?.Dispose();
-            _outputPipeline = null;
-            _session?.Close();
+
+            // Stop decoding before destroying the ring: the decode thread writes straight into
+            // the ring's textures, so tearing them down under it would be a use-after-free.
+            bool decodeStopped = _session?.Close() ?? true;
+
+            if (_outputPipeline != null)
+            {
+                if (decodeStopped)
+                    _outputPipeline.Dispose();
+                else
+                    Debug.LogError("[HapPlayer] Leaking video textures: the decode thread is still running " +
+                                   "and destroying them now would crash");
+                _outputPipeline = null;
+            }
         }
 
         // ── Public playback control ──────────────────────────────────────────
@@ -263,8 +315,7 @@ namespace Bluecadet.Hap
             if (playbackSpeed < -k_PlaybackSpeedEpsilon && _playbackClock.Time <= 0f)
             {
                 _playbackClock.Time = Duration;
-                if (FrameCount > 0)
-                    _session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), -1);
+                SeekDecodeToClock();
             }
             _playing = true;
         }
@@ -281,8 +332,7 @@ namespace Bluecadet.Hap
             _pendingPlay = false;
             _playing = false;
             _playbackClock.Time = 0f;
-            if (IsOpen && FrameCount > 0)
-                _session.RequestDecode(0, 1);
+            SeekDecodeToClock();
         }
 
         /// <summary>Close current file (if any) and open a new one.</summary>
@@ -305,7 +355,6 @@ namespace Bluecadet.Hap
                     ? UnityEngine.Time.unscaledDeltaTime
                     : UnityEngine.Time.deltaTime;
 
-                int dir = playbackSpeed > 0f ? 1 : -1;
                 var evt = _playbackClock.Advance(dt, playbackSpeed, Duration, loop);
 
                 switch (evt)
@@ -319,7 +368,10 @@ namespace Bluecadet.Hap
                         break;
                 }
 
-                _session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), dir);
+                // Those handlers are free to close this player or open another file, which takes
+                // the session and the pipeline out from under the rest of this tick. Everything
+                // below does nothing without them.
+                SeekDecodeToClock();
             }
 
             bool uploadedNewFrame;
@@ -327,29 +379,22 @@ namespace Bluecadet.Hap
                 uploadedNewFrame = UploadFrame();
 
             using (s_RenderMarker.Auto())
-            switch (renderMode)
-            {
-                case HapRenderMode.MaterialOverride:
-                    var tex = Texture;
-                    if (targetRenderer != null && tex != null)
-                    {
-                        _mpb ??= new MaterialPropertyBlock();
-                        targetRenderer.GetPropertyBlock(_mpb);
-                        _mpb.SetTexture(MainTexId, tex);
-                        targetRenderer.SetPropertyBlock(_mpb);
-                    }
-                    break;
-                case HapRenderMode.RenderTexture:
-                    var srcTex = Texture;
-                    if (targetRenderTexture != null && srcTex != null)
-                        Graphics.Blit(srcTex, targetRenderTexture);
-                    break;
-                case HapRenderMode.APIOnly:
-                    break;
-            }
+                RenderFrame();
 
             if (uploadedNewFrame)
                 _outputPipeline?.SwapBuffers();
+        }
+
+        /// <summary>
+        /// Ask the decoder for the frame the clock is now on, reading ahead in the direction
+        /// playback is moving.
+        /// </summary>
+        void SeekDecodeToClock()
+        {
+            if (!IsOpen || FrameCount <= 0) return;
+
+            int direction = playbackSpeed > 0f ? 1 : -1;
+            _session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), direction);
         }
 
         bool UploadFrame()
@@ -358,9 +403,31 @@ namespace Bluecadet.Hap
             // Skip GPU uploads in the same frame that CompleteOpen() ran. D3D12 requires at least
             // one command-list flush between RenderTexture.Create() and the first blit that targets it.
             if (UnityEngine.Time.frameCount == _openedFrame) return false;
-            if (!_session.TryAcquireFrame(out var lease)) return false;
-            using (lease)
-                return _outputPipeline.Upload(lease.Data, lease.FrameIndex);
+            return _outputPipeline.Present();
+        }
+
+        /// <summary>Put the current frame wherever <see cref="RenderMode"/> says it goes.</summary>
+        void RenderFrame()
+        {
+            var tex = Texture;
+            if (tex == null) return;
+
+            switch (renderMode)
+            {
+                case HapRenderMode.MaterialOverride:
+                    if (targetRenderer == null) break;
+                    _mpb ??= new MaterialPropertyBlock();
+                    targetRenderer.GetPropertyBlock(_mpb);
+                    _mpb.SetTexture(MainTexId, tex);
+                    targetRenderer.SetPropertyBlock(_mpb);
+                    break;
+                case HapRenderMode.RenderTexture:
+                    if (targetRenderTexture != null)
+                        Graphics.Blit(tex, targetRenderTexture);
+                    break;
+                case HapRenderMode.APIOnly:
+                    break;
+            }
         }
     }
 }

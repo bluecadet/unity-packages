@@ -20,8 +20,8 @@ namespace Bluecadet.Hap.Tests
         const int Width = 64;
         const int Height = 64;
 
-        /// <summary>64x64 DXT1 = 16x16 blocks of 8 bytes.</summary>
-        const int Dxt1Size = 2048;
+        /// <summary>Raw size of a 64x64 DXT1 texture, the same arithmetic the plugin uses.</summary>
+        static readonly int Dxt1Size = HapTestFixtures.BlockBytes(HapFormat.DXT1, Width, Height);
 
         const ushort Red565 = 0xF800;
         const ushort Green565 = 0x07E0;
