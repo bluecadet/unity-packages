@@ -133,6 +133,15 @@ HAP_EXPORT int32_t hap_decode_texture(HapHandle *h, int32_t frame_index,
                                       int32_t tex_index, uint8_t *buf,
                                       int32_t buf_size);
 
+/* Ask the OS to fault in frame frame_index's bytes ahead of decoding it --
+ * madvise(MADV_WILLNEED) on POSIX, PrefetchVirtualMemory on Windows.
+ *
+ * Purely advisory: a NULL handle, an out-of-range or negative index, and a
+ * refused hint are all silent no-ops, and no decode behaves differently
+ * either way. Cheap enough to call once per decoded frame, which is what
+ * this package does (one frame ahead, in the playback direction). */
+HAP_EXPORT void    hap_prefetch_frame(HapHandle *h, int32_t frame_index);
+
 /* Set how many threads decode a chunked frame's chunks in parallel,
  * process-wide (not per handle). thread_count includes the calling decode
  * thread, which always decodes a share itself, so 1 means "no helper

@@ -169,6 +169,51 @@ test "hap_decode_texture matches the committed Hap golden texture" {
     try test_support.expectMatchesGolden("tests/fixtures/hap1_golden.bin", buf);
 }
 
+test "hap_prefetch_frame survives any index and leaves decoding correct" {
+    const handle = try openFixtureHandle("tests/fixtures/hap1.mov");
+    defer abi.hap_close(handle);
+
+    const frame_count = abi.hap_get_frame_count(handle);
+    const size = abi.hap_get_texture_buffer_size(handle, 0);
+    const buf = try testing.allocator.alloc(u8, @intCast(size));
+    defer testing.allocator.free(buf);
+
+    // Nothing here has an observable result -- a hint is a hint -- so what
+    // is under test is that none of it faults, and that the decode after it
+    // still produces exactly the golden bytes.
+    abi.hap_prefetch_frame(null, 0);
+    abi.hap_prefetch_frame(handle, -1);
+    abi.hap_prefetch_frame(handle, std.math.minInt(i32));
+    abi.hap_prefetch_frame(handle, frame_count);
+    abi.hap_prefetch_frame(handle, std.math.maxInt(i32));
+
+    var frame: i32 = 0;
+    while (frame < frame_count) : (frame += 1) abi.hap_prefetch_frame(handle, frame);
+
+    try testing.expectEqual(ok(.ok), abi.hap_decode_texture(handle, 0, 0, buf.ptr, size));
+    try test_support.expectMatchesGolden("tests/fixtures/hap1_golden.bin", buf);
+}
+
+test "hap_prefetch_frame does not disturb the shared-sample cache" {
+    // Hap Q Alpha decodes both textures from one demuxed sample; a prefetch
+    // between the two calls must not send the second one down a different
+    // path than it would otherwise take.
+    const handle = try openFixtureHandle("tests/fixtures/hapm.mov");
+    defer abi.hap_close(handle);
+
+    const color = try testing.allocator.alloc(u8, @intCast(abi.hap_get_texture_buffer_size(handle, 0)));
+    defer testing.allocator.free(color);
+    const alpha = try testing.allocator.alloc(u8, @intCast(abi.hap_get_texture_buffer_size(handle, 1)));
+    defer testing.allocator.free(alpha);
+
+    try testing.expectEqual(ok(.ok), abi.hap_decode_texture(handle, 0, 0, color.ptr, @intCast(color.len)));
+    abi.hap_prefetch_frame(handle, 1);
+    try testing.expectEqual(ok(.ok), abi.hap_decode_texture(handle, 0, 1, alpha.ptr, @intCast(alpha.len)));
+
+    try test_support.expectMatchesGolden("tests/fixtures/hapm_golden_tex0.bin", color);
+    try test_support.expectMatchesGolden("tests/fixtures/hapm_golden_tex1.bin", alpha);
+}
+
 test "hap_open reports a missing file as HAP_ERROR_FILE_NOT_FOUND" {
     var handle: ?*Handle = null;
     try testing.expectEqual(

@@ -103,6 +103,17 @@ namespace Bluecadet.Hap
         public static extern int hap_decode_texture(IntPtr h, int frameIndex, int texIndex,
                                                     IntPtr buf, int bufSize);
 
+        /// <summary>
+        /// Ask the OS to fault in a frame's compressed bytes ahead of decoding it —
+        /// <c>madvise(MADV_WILLNEED)</c> on macOS/Linux, <c>PrefetchVirtualMemory</c> on Windows.
+        ///
+        /// Purely advisory and cheap enough to call once per decoded frame: a null handle, an
+        /// out-of-range or negative index, and a hint the kernel declines are all silent no-ops,
+        /// and no decode behaves differently either way — only how long it waits on the disk.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void hap_prefetch_frame(IntPtr h, int frameIndex);
+
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         static extern int hap_set_thread_count(int threadCount);
 
