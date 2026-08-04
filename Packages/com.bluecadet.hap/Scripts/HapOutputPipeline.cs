@@ -19,7 +19,6 @@ namespace Bluecadet.Hap
     /// </summary>
     internal sealed class HapOutputPipeline : IDisposable
     {
-        static readonly int MainTexId = Shader.PropertyToID("_MainTex");
         static readonly int AlphaTexId = Shader.PropertyToID("_AlphaTex");
 
         readonly HapTextureRing _ring;
@@ -120,7 +119,6 @@ namespace Bluecadet.Hap
 
                 if (_variant.HasAlphaTexture)
                     _material.SetTexture(AlphaTexId, lease.AlphaTexture);
-                _material.SetTexture(MainTexId, lease.ColorTexture);
 
                 int writeIndex = (_displayIndex + 1) % _rts.Length;
                 Graphics.Blit(lease.ColorTexture, _rts[writeIndex], _material);
