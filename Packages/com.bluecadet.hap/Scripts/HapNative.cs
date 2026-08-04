@@ -1,135 +1,150 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Bluecadet.Hap
 {
     /// <summary>
-    /// P/Invoke bindings to the native bluecadet_hap plugin.
+    /// Result code returned by every fallible native entry point.
+    /// Mirrors <c>HapError</c> in the plugin's C header.
+    /// </summary>
+    internal enum HapError
+    {
+        Ok = 0,
+        /// <summary>A null pointer, an out-of-range index, or a nonsensical count.</summary>
+        InvalidArgument = 1,
+        /// <summary>The path could not be opened (missing file, no permission).</summary>
+        FileNotFound = 2,
+        /// <summary>The file exists but could not be stat'd or memory-mapped.</summary>
+        FileRead = 3,
+        /// <summary>Not a parseable MP4/MOV container.</summary>
+        NotAMov = 4,
+        /// <summary>A container, but with no Hap video track in it.</summary>
+        NoHapTrack = 5,
+        /// <summary>A Hap track whose variant cannot be decoded.</summary>
+        UnsupportedVariant = 6,
+        /// <summary>The Hap track's sample table is empty or inconsistent with the file.</summary>
+        CorruptTrack = 7,
+        /// <summary>The frame index is outside [0, FrameCount).</summary>
+        FrameOutOfRange = 8,
+        /// <summary>The frame's bytes are not a valid/supported Hap frame.</summary>
+        InvalidFrame = 9,
+        /// <summary>The supplied buffer is smaller than the decoded texture.</summary>
+        BufferTooSmall = 10,
+        /// <summary>An allocation failed.</summary>
+        OutOfMemory = 11,
+    }
+
+    /// <summary>
+    /// P/Invoke bindings to the native bluecadet_hap plugin, which demuxes Hap MOV/MP4
+    /// files and decompresses their frames into raw block-compressed texture data.
     ///
-    /// The native plugin handles:
-    /// - Demuxing: Reading compressed video frames from MOV/MP4 container files
-    /// - Decoding: Decompressing HAP's Snappy-compressed data to raw DXT/BC7 texture data
-    ///
-    /// The plugin is written in C and lives in Native~/. It uses:
-    /// - minimp4 for MOV demuxing
-    /// - Vidvox HAP library for HAP frame decoding
-    /// - snappy-c for Snappy decompression
+    /// Threading: calls on one handle must be serialized by the caller (this package uses a
+    /// single decode thread per open file). Different handles are fully independent.
+    /// <see cref="SetThreadCount"/> is process-global.
     /// </summary>
     internal static class HapNative
     {
         const string LibName = "bluecadet_hap";
 
-        /// <summary>
-        /// Open a HAP video file. Returns an opaque handle for subsequent calls.
-        /// </summary>
-        /// <param name="path">Absolute path to the .mov file</param>
-        /// <param name="err">Error code if open fails (see Error* constants)</param>
-        /// <returns>Handle to the opened video, or IntPtr.Zero on failure</returns>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr hap_open(string path, out int err);
+        // ── Raw entry points ─────────────────────────────────────────────────
 
-        /// <summary>Close a video handle and free all native resources.</summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        static extern int hap_open(byte[] utf8Path, out IntPtr outHandle);
+
+        /// <summary>Release a handle and everything it owns. IntPtr.Zero is a no-op.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void hap_close(IntPtr h);
 
-        /// <summary>Get video width in pixels.</summary>
+        /// <summary>Video width in pixels, or 0 for a null handle.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int hap_get_width(IntPtr h);
 
-        /// <summary>Get video height in pixels.</summary>
+        /// <summary>Video height in pixels, or 0 for a null handle.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int hap_get_height(IntPtr h);
 
-        /// <summary>Get total number of frames in the video.</summary>
+        /// <summary>Number of frames in the video, or 0 for a null handle.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int hap_get_frame_count(IntPtr h);
 
-        /// <summary>Get video frame rate in frames per second.</summary>
+        /// <summary>Frame rate in frames per second, or 0 for a null handle.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern float hap_get_frame_rate(IntPtr h);
 
-        /// <summary>
-        /// Get the texture format code (TexFormatDXT1, TexFormatDXT5, TexFormatBC7, or TexFormatYCoCgDXT5).
-        /// </summary>
+        /// <summary>Number of textures each frame carries: 1, or 2 for Hap Q Alpha.</summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int hap_get_texture_format(IntPtr h);
+        public static extern int hap_get_texture_count(IntPtr h);
 
         /// <summary>
-        /// Get the size in bytes of one decoded frame.
-        /// Use this to allocate buffers for hap_decode_frame.
+        /// <see cref="HapFormat"/> of the given texture, or 0 if the handle is null or the
+        /// index is out of range.
         /// </summary>
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int hap_get_frame_buffer_size(IntPtr h);
+        public static extern int hap_get_texture_format(IntPtr h, int texIndex);
 
         /// <summary>
-        /// Decode a video frame.
+        /// Decoded byte size of the given texture — the buffer size
+        /// <see cref="hap_decode_texture"/> needs — or 0 for a null handle / bad index.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hap_get_texture_buffer_size(IntPtr h, int texIndex);
+
+        /// <summary>
+        /// Decompress one texture of one frame straight into <paramref name="buf"/> — no
+        /// intermediate copy, so the buffer may be a texture's raw data.
         ///
-        /// This reads the compressed frame from disk, decompresses it, and writes
-        /// raw DXT/BC7 texture data to the output buffer.
+        /// For Hap Q Alpha, decoding texture 0 then texture 1 of the same frame reuses the
+        /// sample read for the first call, so decode a frame's textures back to back.
+        /// On a non-Ok result the buffer contents are unspecified (the frame may have been
+        /// partially decoded), but nothing is written past <paramref name="bufSize"/>.
+        /// </summary>
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int hap_decode_texture(IntPtr h, int frameIndex, int texIndex,
+                                                    IntPtr buf, int bufSize);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        static extern int hap_set_thread_count(int threadCount);
+
+        // ── Typed wrappers ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Open a Hap video file. On success <paramref name="handle"/> receives the new handle;
+        /// on failure it is IntPtr.Zero and the returned error says why.
         ///
-        /// Note: Not thread-safe per handle. Only call from one thread at a time.
+        /// The path is marshalled as UTF-8 explicitly rather than relying on the platform's
+        /// default string marshalling, which the native side does not use.
         /// </summary>
-        /// <param name="h">Video handle</param>
-        /// <param name="frameIndex">Frame number to decode (0-based)</param>
-        /// <param name="buf">Output buffer for decoded texture data</param>
-        /// <param name="size">Size of output buffer (must be >= hap_get_frame_buffer_size)</param>
-        /// <returns>ErrorNone on success, or an error code on failure</returns>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int hap_decode_frame(IntPtr h, int frameIndex, IntPtr buf, int size);
+        public static HapError Open(string path, out IntPtr handle)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                handle = IntPtr.Zero;
+                return HapError.InvalidArgument;
+            }
+
+            int byteCount = Encoding.UTF8.GetByteCount(path);
+            var utf8 = new byte[byteCount + 1];
+            Encoding.UTF8.GetBytes(path, 0, path.Length, utf8, 0);
+            utf8[byteCount] = 0;
+
+            return (HapError)hap_open(utf8, out handle);
+        }
 
         /// <summary>
-        /// Split version of hap_decode_frame — step 1: read the compressed frame
-        /// from the memory-mapped file into the native internal buffer.
+        /// Decode one texture of one frame into the given buffer.
+        /// See <see cref="hap_decode_texture"/> for the contract.
+        /// </summary>
+        public static HapError DecodeTexture(IntPtr h, int frameIndex, int texIndex, IntPtr buf, int bufSize)
+            => (HapError)hap_decode_texture(h, frameIndex, texIndex, buf, bufSize);
+
+        /// <summary>
+        /// Set how many threads decode a chunked frame's chunks in parallel. The count
+        /// includes the decode thread itself, so 1 means "no helper threads".
         ///
-        /// Returns the number of compressed bytes read, or &lt; 0 on error.
-        /// This is where I/O time (and page-fault latency) shows up.
-        /// Must be followed by hap_decompress_frame on the same thread.
+        /// This setting is process-global, not per file: the last caller wins, and the change
+        /// applies to every currently playing video from its next chunked frame onwards.
         /// </summary>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int hap_read_sample(IntPtr h, int frameIndex);
-
-        /// <summary>
-        /// Split version of hap_decode_frame — step 2: Snappy-decompress the data
-        /// read by the preceding hap_read_sample call into buf.
-        ///
-        /// Returns ErrorNone on success, or an error code on failure.
-        /// This is where CPU decompression time shows up.
-        /// </summary>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int hap_decompress_frame(IntPtr h, IntPtr buf, int size);
-
-        /// <summary>
-        /// Set the number of threads for parallel decoding (if supported by the codec).
-        /// </summary>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void hap_set_thread_count(IntPtr h, int count);
-
-        /// <summary>
-        /// Asynchronously warm the OS page cache for a compressed frame's data.
-        /// On Windows this calls PrefetchVirtualMemory; on other platforms it is a no-op.
-        /// Call from the decode thread with the next frame index while the current frame
-        /// is being displayed to hide page-fault latency for sequential playback.
-        /// </summary>
-        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void hap_prefetch_frame(IntPtr h, int frameIndex);
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Error codes
-        // ─────────────────────────────────────────────────────────────────────
-
-        public const int ErrorNone = 0;    // Success
-        public const int ErrorFile = 1;    // File not found or I/O error
-        public const int ErrorFormat = 2;  // Not a valid HAP video
-        public const int ErrorDecode = 3;  // Decompression failed
-        public const int ErrorArgs = 4;    // Invalid arguments
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Texture format codes
-        // ─────────────────────────────────────────────────────────────────────
-
-        public const int TexFormatDXT1      = 1;  // HAP — DXT1/BC1, no alpha, 4:1 compression
-        public const int TexFormatDXT5      = 2;  // HAP Alpha — DXT5/BC3, with alpha channel
-        public const int TexFormatBC7       = 3;  // BC7 variant
-        public const int TexFormatYCoCgDXT5 = 4;  // HAP Q — DXT5 with YCoCg color space, requires shader decode
+        public static HapError SetThreadCount(int threadCount) => (HapError)hap_set_thread_count(threadCount);
     }
 }

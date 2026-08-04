@@ -1,208 +1,180 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using NUnit.Framework;
-using Bluecadet.Hap;
 
 namespace Bluecadet.Hap.Tests
 {
+    /// <summary>
+    /// Every Hap variant the plugin decodes, in both single-chunk and chunked encodings:
+    /// the format and buffer size each one reports, and that all of its frames decode.
+    /// </summary>
     [TestFixture]
     public class HapNativeMultiFormatTests
     {
-        private IntPtr _handle = IntPtr.Zero;
-
-        private static string FixturesDir => Path.GetFullPath(
-            Path.Combine(
-                UnityEngine.Application.dataPath,
-                "../../../Packages/com.bluecadet.hap/Tests~/TestFixtures"
-            )
-        );
-
-        private static string DXT1Path  => Path.Combine(FixturesDir, "test_64x64.mov");
-        private static string DXT5Path  => Path.Combine(FixturesDir, "test_64x64_hap_alpha.mov");
-        private static string HapQPath  => Path.Combine(FixturesDir, "test_64x64_hap_q.mov");
+        readonly List<IntPtr> _handles = new();
 
         [TearDown]
         public void TearDown()
         {
-            if (_handle != IntPtr.Zero)
+            foreach (var h in _handles)
+                if (h != IntPtr.Zero) HapNative.hap_close(h);
+            _handles.Clear();
+        }
+
+        IntPtr Open(string path)
+        {
+            HapTestFixtures.Require(path);
+            var error = HapNative.Open(path, out IntPtr handle);
+            Assert.That(error, Is.EqualTo(HapError.Ok), $"failed to open {Path.GetFileName(path)}");
+            _handles.Add(handle);
+            return handle;
+        }
+
+        static IEnumerable<TestCaseData> SingleTextureVariants()
+        {
+            yield return new TestCaseData(HapTestFixtures.Hap1, (int)HapFormat.DXT1, HapTestFixtures.Dxt1Size).SetName("Hap");
+            yield return new TestCaseData(HapTestFixtures.Hap1Chunked, (int)HapFormat.DXT1, HapTestFixtures.Dxt1Size).SetName("Hap_chunked");
+            yield return new TestCaseData(HapTestFixtures.Hap1Audio, (int)HapFormat.DXT1, HapTestFixtures.Dxt1Size).SetName("Hap_with_audio");
+            yield return new TestCaseData(HapTestFixtures.Hap5, (int)HapFormat.DXT5, HapTestFixtures.Dxt5Size).SetName("HapAlpha");
+            yield return new TestCaseData(HapTestFixtures.Hap5Chunked, (int)HapFormat.DXT5, HapTestFixtures.Dxt5Size).SetName("HapAlpha_chunked");
+            yield return new TestCaseData(HapTestFixtures.HapY, (int)HapFormat.YCoCgDXT5, HapTestFixtures.Dxt5Size).SetName("HapQ");
+            yield return new TestCaseData(HapTestFixtures.HapYChunked, (int)HapFormat.YCoCgDXT5, HapTestFixtures.Dxt5Size).SetName("HapQ_chunked");
+            yield return new TestCaseData(HapTestFixtures.Hap7, (int)HapFormat.BC7, HapTestFixtures.Dxt5Size).SetName("HapR");
+        }
+
+        [TestCaseSource(nameof(SingleTextureVariants))]
+        public void Variant_ReportsOneTextureWithExpectedLayout(string path, int formatCode, int bufferSize)
+        {
+            IntPtr h = Open(path);
+            Assert.That(HapNative.hap_get_texture_count(h), Is.EqualTo(1));
+            Assert.That(HapNative.hap_get_texture_format(h, 0), Is.EqualTo(formatCode));
+            Assert.That(HapNative.hap_get_texture_buffer_size(h, 0), Is.EqualTo(bufferSize));
+            Assert.That(HapNative.hap_get_width(h), Is.EqualTo(HapTestFixtures.Width));
+            Assert.That(HapNative.hap_get_height(h), Is.EqualTo(HapTestFixtures.Height));
+        }
+
+        [TestCaseSource(nameof(SingleTextureVariants))]
+        public void Variant_DecodesEveryFrame(string path, int formatCode, int bufferSize)
+        {
+            IntPtr h = Open(path);
+            int frameCount = HapNative.hap_get_frame_count(h);
+            Assert.That(frameCount, Is.GreaterThan(0));
+
+            using var buffer = HapTestFixtures.NativeBuffer(bufferSize);
+            for (int i = 0; i < frameCount; i++)
+                Assert.That(HapNative.DecodeTexture(h, i, 0, buffer.Ptr, buffer.Size),
+                    Is.EqualTo(HapError.Ok), $"frame {i} of {Path.GetFileName(path)}");
+        }
+
+        // ── Hap Q Alpha (two textures per frame) ─────────────────────────────
+
+        [Test]
+        public void HapQAlpha_ReportsTwoTextures()
+        {
+            IntPtr h = Open(HapTestFixtures.HapM);
+            Assert.That(HapNative.hap_get_texture_count(h), Is.EqualTo(2));
+        }
+
+        [Test]
+        public void HapQAlpha_TextureLayouts_AreColorThenAlpha()
+        {
+            IntPtr h = Open(HapTestFixtures.HapM);
+
+            Assert.That(HapNative.hap_get_texture_format(h, 0), Is.EqualTo((int)HapFormat.YCoCgDXT5));
+            Assert.That(HapNative.hap_get_texture_format(h, 1), Is.EqualTo((int)HapFormat.RGTC1));
+
+            // The alpha texture is half the size of the colour texture: 8 bytes per block vs 16.
+            Assert.That(HapNative.hap_get_texture_buffer_size(h, 0), Is.EqualTo(HapTestFixtures.Dxt5Size));
+            Assert.That(HapNative.hap_get_texture_buffer_size(h, 1), Is.EqualTo(HapTestFixtures.Dxt1Size));
+        }
+
+        [Test]
+        public void HapQAlpha_OutOfRangeTextureIndex_ReportsNothing()
+        {
+            IntPtr h = Open(HapTestFixtures.HapM);
+            Assert.That(HapNative.hap_get_texture_format(h, 2), Is.EqualTo(0));
+            Assert.That(HapNative.hap_get_texture_buffer_size(h, 2), Is.EqualTo(0));
+            Assert.That(HapNative.hap_get_texture_format(h, -1), Is.EqualTo(0));
+        }
+
+        [Test]
+        public void HapQAlpha_BothTexturesDecode_WithDistinctContent()
+        {
+            IntPtr h = Open(HapTestFixtures.HapM);
+            int colorSize = HapNative.hap_get_texture_buffer_size(h, 0);
+            int alphaSize = HapNative.hap_get_texture_buffer_size(h, 1);
+
+            byte[] color = HapTestFixtures.DecodeToBytes(h, 0, 0, colorSize);
+            byte[] alpha = HapTestFixtures.DecodeToBytes(h, 0, 1, alphaSize);
+
+            // An aliased-buffer regression (both textures decoded from the same section)
+            // would show up as the alpha texture repeating the colour texture's bytes.
+            bool identicalPrefix = true;
+            for (int i = 0; i < alphaSize; i++)
             {
-                HapNative.hap_close(_handle);
-                _handle = IntPtr.Zero;
+                if (color[i] != alpha[i]) { identicalPrefix = false; break; }
+            }
+            Assert.That(identicalPrefix, Is.False, "colour and alpha textures decoded to the same bytes");
+        }
+
+        [Test]
+        public void HapQAlpha_BothTextures_MatchGoldenFrameZero()
+        {
+            HapTestFixtures.Require(HapTestFixtures.HapMGoldenTex0);
+            HapTestFixtures.Require(HapTestFixtures.HapMGoldenTex1);
+            IntPtr h = Open(HapTestFixtures.HapM);
+
+            byte[] golden0 = File.ReadAllBytes(HapTestFixtures.HapMGoldenTex0);
+            byte[] golden1 = File.ReadAllBytes(HapTestFixtures.HapMGoldenTex1);
+
+            Assert.That(HapTestFixtures.DecodeToBytes(h, 0, 0, golden0.Length), Is.EqualTo(golden0), "colour texture");
+            Assert.That(HapTestFixtures.DecodeToBytes(h, 0, 1, golden1.Length), Is.EqualTo(golden1), "alpha texture");
+        }
+
+        [Test]
+        public void HapQAlpha_DecodesEveryFrame_BothTextures()
+        {
+            IntPtr h = Open(HapTestFixtures.HapM);
+            int frameCount = HapNative.hap_get_frame_count(h);
+            int colorSize = HapNative.hap_get_texture_buffer_size(h, 0);
+            int alphaSize = HapNative.hap_get_texture_buffer_size(h, 1);
+
+            using var color = HapTestFixtures.NativeBuffer(colorSize);
+            using var alpha = HapTestFixtures.NativeBuffer(alphaSize);
+            for (int i = 0; i < frameCount; i++)
+            {
+                Assert.That(HapNative.DecodeTexture(h, i, 0, color.Ptr, color.Size), Is.EqualTo(HapError.Ok),
+                    $"colour texture of frame {i}");
+                Assert.That(HapNative.DecodeTexture(h, i, 1, alpha.Ptr, alpha.Size), Is.EqualTo(HapError.Ok),
+                    $"alpha texture of frame {i}");
             }
         }
 
-        // ── HAP Alpha (DXT5) ────────────────────────────────────────────────
+        // ── Cross-format ─────────────────────────────────────────────────────
 
         [Test]
-        public void HapAlpha_Open_ReturnsValidHandle()
+        public void SingleChunkAndChunked_DecodeToTheSameBytes()
         {
-            Assume.That(File.Exists(DXT5Path), "HAP Alpha fixture not found: " + DXT5Path);
-            _handle = HapNative.hap_open(DXT5Path, out int err);
-            Assert.That(_handle, Is.Not.EqualTo(System.IntPtr.Zero));
-            Assert.That(err, Is.EqualTo(HapNative.ErrorNone));
+            IntPtr plain = Open(HapTestFixtures.Hap1);
+            IntPtr chunked = Open(HapTestFixtures.Hap1Chunked);
+
+            int size = HapNative.hap_get_texture_buffer_size(plain, 0);
+            Assert.That(HapNative.hap_get_texture_buffer_size(chunked, 0), Is.EqualTo(size));
+            Assert.That(HapTestFixtures.DecodeToBytes(chunked, 0, 0, size),
+                Is.EqualTo(HapTestFixtures.DecodeToBytes(plain, 0, 0, size)));
         }
 
         [Test]
-        public void HapAlpha_TextureFormat_ReturnsDXT5()
+        public void FormatCodes_AreDistinctPerVariant()
         {
-            Assume.That(File.Exists(DXT5Path), "HAP Alpha fixture not found: " + DXT5Path);
-            _handle = HapNative.hap_open(DXT5Path, out int _);
-            Assert.That(HapNative.hap_get_texture_format(_handle), Is.EqualTo(HapNative.TexFormatDXT5));
-        }
+            int dxt1 = HapNative.hap_get_texture_format(Open(HapTestFixtures.Hap1), 0);
+            int dxt5 = HapNative.hap_get_texture_format(Open(HapTestFixtures.Hap5), 0);
+            int ycocg = HapNative.hap_get_texture_format(Open(HapTestFixtures.HapY), 0);
+            int bc7 = HapNative.hap_get_texture_format(Open(HapTestFixtures.Hap7), 0);
+            int rgtc1 = HapNative.hap_get_texture_format(Open(HapTestFixtures.HapM), 1);
 
-        [Test]
-        public void HapAlpha_FrameBufferSize_Returns4096()
-        {
-            Assume.That(File.Exists(DXT5Path), "HAP Alpha fixture not found: " + DXT5Path);
-            _handle = HapNative.hap_open(DXT5Path, out int _);
-            // DXT5 = 1 byte/pixel, 64×64 = 4096 bytes
-            Assert.That(HapNative.hap_get_frame_buffer_size(_handle), Is.EqualTo(4096));
-        }
-
-        [Test]
-        public void HapAlpha_Metadata_MatchesExpected()
-        {
-            Assume.That(File.Exists(DXT5Path), "HAP Alpha fixture not found: " + DXT5Path);
-            _handle = HapNative.hap_open(DXT5Path, out int _);
-            Assert.That(HapNative.hap_get_width(_handle),       Is.EqualTo(64));
-            Assert.That(HapNative.hap_get_height(_handle),      Is.EqualTo(64));
-            Assert.That(HapNative.hap_get_frame_count(_handle), Is.EqualTo(30));
-            Assert.That(HapNative.hap_get_frame_rate(_handle),  Is.EqualTo(30f).Within(0.001f));
-        }
-
-        [Test]
-        public void HapAlpha_DecodeAllFrames_AllSucceed()
-        {
-            Assume.That(File.Exists(DXT5Path), "HAP Alpha fixture not found: " + DXT5Path);
-            _handle = HapNative.hap_open(DXT5Path, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
-            int frameCount      = HapNative.hap_get_frame_count(_handle);
-
-            System.IntPtr buf = Marshal.AllocHGlobal(frameBufferSize);
-            try
-            {
-                for (int i = 0; i < frameCount; i++)
-                {
-                    Assert.That(HapNative.hap_read_sample(_handle, i),        Is.GreaterThan(0), $"read_sample failed for frame {i}");
-                    Assert.That(HapNative.hap_decompress_frame(_handle, buf, frameBufferSize), Is.EqualTo(HapNative.ErrorNone), $"decompress failed for frame {i}");
-                }
-            }
-            finally { Marshal.FreeHGlobal(buf); }
-        }
-
-        // ── HAP Q (YCoCg DXT5) ─────────────────────────────────────────────
-
-        [Test]
-        public void HapQ_Open_ReturnsValidHandle()
-        {
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found: " + HapQPath);
-            _handle = HapNative.hap_open(HapQPath, out int err);
-            Assert.That(_handle, Is.Not.EqualTo(System.IntPtr.Zero));
-            Assert.That(err, Is.EqualTo(HapNative.ErrorNone));
-        }
-
-        [Test]
-        public void HapQ_TextureFormat_ReturnsYCoCgDXT5()
-        {
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found: " + HapQPath);
-            _handle = HapNative.hap_open(HapQPath, out int _);
-            Assert.That(HapNative.hap_get_texture_format(_handle), Is.EqualTo(HapNative.TexFormatYCoCgDXT5));
-        }
-
-        [Test]
-        public void HapQ_FrameBufferSize_Returns4096()
-        {
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found: " + HapQPath);
-            _handle = HapNative.hap_open(HapQPath, out int _);
-            // YCoCg DXT5 = 1 byte/pixel, 64×64 = 4096 bytes
-            Assert.That(HapNative.hap_get_frame_buffer_size(_handle), Is.EqualTo(4096));
-        }
-
-        [Test]
-        public void HapQ_Metadata_MatchesExpected()
-        {
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found: " + HapQPath);
-            _handle = HapNative.hap_open(HapQPath, out int _);
-            Assert.That(HapNative.hap_get_width(_handle),       Is.EqualTo(64));
-            Assert.That(HapNative.hap_get_height(_handle),      Is.EqualTo(64));
-            Assert.That(HapNative.hap_get_frame_count(_handle), Is.EqualTo(30));
-            Assert.That(HapNative.hap_get_frame_rate(_handle),  Is.EqualTo(30f).Within(0.001f));
-        }
-
-        [Test]
-        public void HapQ_DecodeAllFrames_AllSucceed()
-        {
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found: " + HapQPath);
-            _handle = HapNative.hap_open(HapQPath, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
-            int frameCount      = HapNative.hap_get_frame_count(_handle);
-
-            System.IntPtr buf = Marshal.AllocHGlobal(frameBufferSize);
-            try
-            {
-                for (int i = 0; i < frameCount; i++)
-                {
-                    Assert.That(HapNative.hap_read_sample(_handle, i),        Is.GreaterThan(0), $"read_sample failed for frame {i}");
-                    Assert.That(HapNative.hap_decompress_frame(_handle, buf, frameBufferSize), Is.EqualTo(HapNative.ErrorNone), $"decompress failed for frame {i}");
-                }
-            }
-            finally { Marshal.FreeHGlobal(buf); }
-        }
-
-        // ── Cross-format ────────────────────────────────────────────────────
-
-        [Test]
-        public void AllFormats_TextureFormatCodesAreDistinct()
-        {
-            Assume.That(File.Exists(DXT1Path), "DXT1 fixture not found");
-            Assume.That(File.Exists(DXT5Path), "DXT5 fixture not found");
-            Assume.That(File.Exists(HapQPath), "HAP Q fixture not found");
-
-            IntPtr h1 = HapNative.hap_open(DXT1Path, out int _);
-            IntPtr h2 = HapNative.hap_open(DXT5Path, out int _);
-            IntPtr h3 = HapNative.hap_open(HapQPath, out int _);
-            try
-            {
-                int fmt1 = HapNative.hap_get_texture_format(h1);
-                int fmt2 = HapNative.hap_get_texture_format(h2);
-                int fmt3 = HapNative.hap_get_texture_format(h3);
-
-                Assert.That(fmt1, Is.EqualTo(HapNative.TexFormatDXT1));
-                Assert.That(fmt2, Is.EqualTo(HapNative.TexFormatDXT5));
-                Assert.That(fmt3, Is.EqualTo(HapNative.TexFormatYCoCgDXT5));
-                Assert.That(fmt1, Is.Not.EqualTo(fmt2));
-                Assert.That(fmt2, Is.Not.EqualTo(fmt3));
-                Assert.That(fmt1, Is.Not.EqualTo(fmt3));
-            }
-            finally
-            {
-                if (h1 != System.IntPtr.Zero) HapNative.hap_close(h1);
-                if (h2 != System.IntPtr.Zero) HapNative.hap_close(h2);
-                if (h3 != System.IntPtr.Zero) HapNative.hap_close(h3);
-            }
-        }
-
-        [Test]
-        public void DXT1VsDXT5_FrameBufferSizeDiffers()
-        {
-            Assume.That(File.Exists(DXT1Path), "DXT1 fixture not found");
-            Assume.That(File.Exists(DXT5Path), "DXT5 fixture not found");
-
-            IntPtr h1 = HapNative.hap_open(DXT1Path, out int _);
-            IntPtr h2 = HapNative.hap_open(DXT5Path, out int _);
-            try
-            {
-                int size1 = HapNative.hap_get_frame_buffer_size(h1);
-                int size2 = HapNative.hap_get_frame_buffer_size(h2);
-                // DXT5 holds 2× as much data as DXT1 for the same dimensions
-                Assert.That(size2, Is.EqualTo(size1 * 2));
-            }
-            finally
-            {
-                if (h1 != System.IntPtr.Zero) HapNative.hap_close(h1);
-                if (h2 != System.IntPtr.Zero) HapNative.hap_close(h2);
-            }
+            Assert.That(new[] { dxt1, dxt5, ycocg, bc7, rgtc1 }, Is.Unique);
         }
     }
 }

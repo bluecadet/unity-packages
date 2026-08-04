@@ -1,22 +1,18 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
+using System.Threading;
 using NUnit.Framework;
-using Bluecadet.Hap;
 
 namespace Bluecadet.Hap.Tests
 {
+    /// <summary>
+    /// Error paths, boundaries, and malformed input: everything the player has to survive
+    /// without taking the editor down with it.
+    /// </summary>
     [TestFixture]
     public class HapNativeAdversarialTests
     {
-        private IntPtr _handle = IntPtr.Zero;
-
-        private static string FixturePath => System.IO.Path.GetFullPath(
-            System.IO.Path.Combine(
-                UnityEngine.Application.dataPath,
-                "../../../Packages/com.bluecadet.hap/Tests~/TestFixtures/test_64x64.mov"
-            )
-        );
+        IntPtr _handle = IntPtr.Zero;
 
         [TearDown]
         public void TearDown()
@@ -28,220 +24,285 @@ namespace Bluecadet.Hap.Tests
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // Error path and boundary tests
-        // ─────────────────────────────────────────────────────────────────────
+        void OpenFixture(string path)
+        {
+            HapTestFixtures.Require(path);
+            Assert.That(HapNative.Open(path, out _handle), Is.EqualTo(HapError.Ok));
+        }
+
+        // ── Frame and texture indices ────────────────────────────────────────
 
         [Test]
-        public void HapReadSample_NegativeFrameIndex_ReturnsError()
+        public void DecodeTexture_NegativeFrameIndex_ReportsOutOfRange()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int result = HapNative.hap_read_sample(_handle, -1);
-            Assert.That(result, Is.LessThan(0), "Expected error (negative return) for negative frame index");
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            using var buffer = HapTestFixtures.NativeBuffer(size);
+
+            Assert.That(HapNative.DecodeTexture(_handle, -1, 0, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.FrameOutOfRange));
         }
 
         [Test]
-        public void HapReadSample_FrameIndexOutOfRange_ReturnsError()
+        public void DecodeTexture_FrameIndexPastEnd_ReportsOutOfRange()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int result = HapNative.hap_read_sample(_handle, 9999);
-            Assert.That(result, Is.LessThan(0), "Expected error (negative return) for out-of-range frame index");
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            int frameCount = HapNative.hap_get_frame_count(_handle);
+            using var buffer = HapTestFixtures.NativeBuffer(size);
+
+            Assert.That(HapNative.DecodeTexture(_handle, frameCount, 0, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.FrameOutOfRange));
+            Assert.That(HapNative.DecodeTexture(_handle, 9999, 0, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.FrameOutOfRange));
         }
 
         [Test]
-        public void HapDecompressFrame_BufferTooSmall_ReturnsError()
+        public void DecodeTexture_TextureIndexOutOfRange_ReportsInvalidArgument()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            using var buffer = HapTestFixtures.NativeBuffer(size);
 
-            int readBytes = HapNative.hap_read_sample(_handle, 0);
-            Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for frame 0");
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 1, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.InvalidArgument));
+            Assert.That(HapNative.DecodeTexture(_handle, 0, -1, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.InvalidArgument));
+        }
 
-            IntPtr tinyBuf = Marshal.AllocHGlobal(4);
+        [Test]
+        public void DecodeTexture_BufferTooSmall_ReportsBufferTooSmall()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            using var tiny = HapTestFixtures.NativeBuffer(4);
+
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 0, tiny.Ptr, tiny.Size),
+                Is.EqualTo(HapError.BufferTooSmall));
+        }
+
+        [Test]
+        public void DecodeTexture_NullBuffer_ReportsInvalidArgument()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 0, IntPtr.Zero, size),
+                Is.EqualTo(HapError.InvalidArgument));
+        }
+
+        [Test]
+        public void DecodeTexture_NullHandle_ReportsInvalidArgument()
+        {
+            using var buffer = HapTestFixtures.NativeBuffer(16);
+
+            Assert.That(HapNative.DecodeTexture(IntPtr.Zero, 0, 0, buffer.Ptr, buffer.Size),
+                Is.EqualTo(HapError.InvalidArgument));
+        }
+
+        [Test]
+        public void DecodeTexture_OversizedBuffer_IsAccepted()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            using var buffer = HapTestFixtures.NativeBuffer(size * 2);
+
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 0, buffer.Ptr, buffer.Size), Is.EqualTo(HapError.Ok));
+        }
+
+        // ── Repeat and interleaved access ────────────────────────────────────
+
+        [Test]
+        public void DecodeTexture_SameFrameTwice_ProducesIdenticalBytes()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+
+            byte[] first = HapTestFixtures.DecodeToBytes(_handle, 10, 0, size);
+            byte[] second = HapTestFixtures.DecodeToBytes(_handle, 10, 0, size);
+            Assert.That(second, Is.EqualTo(first), "decode is not deterministic");
+        }
+
+        [Test]
+        public void DecodeTexture_ScrubbingOrder_AllSucceed()
+        {
+            OpenFixture(HapTestFixtures.Hap1);
+            int size = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            int frameCount = HapNative.hap_get_frame_count(_handle);
+            int last = frameCount - 1;
+            int[] sequence = { 0, last / 2, 5, last, 1, last - 1, 0 };
+
+            using var buffer = HapTestFixtures.NativeBuffer(size);
+            foreach (int frame in sequence)
+                Assert.That(HapNative.DecodeTexture(_handle, frame, 0, buffer.Ptr, buffer.Size),
+                    Is.EqualTo(HapError.Ok), $"frame {frame}");
+        }
+
+        [Test]
+        public void DecodeTexture_AlphaBeforeColor_StillSucceeds()
+        {
+            HapTestFixtures.Require(HapTestFixtures.HapM);
+            Assert.That(HapNative.Open(HapTestFixtures.HapM, out _handle), Is.EqualTo(HapError.Ok));
+
+            int alphaSize = HapNative.hap_get_texture_buffer_size(_handle, 1);
+            int colorSize = HapNative.hap_get_texture_buffer_size(_handle, 0);
+            using var alpha = HapTestFixtures.NativeBuffer(alphaSize);
+            using var color = HapTestFixtures.NativeBuffer(colorSize);
+
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 1, alpha.Ptr, alpha.Size), Is.EqualTo(HapError.Ok));
+            Assert.That(HapNative.DecodeTexture(_handle, 0, 0, color.Ptr, color.Size), Is.EqualTo(HapError.Ok));
+        }
+
+        // ── Multiple handles ─────────────────────────────────────────────────
+
+        [Test]
+        public void Open_MultipleHandlesOnOneFile_AllUsable()
+        {
+            HapTestFixtures.Require(HapTestFixtures.Hap1);
+
+            var handles = new IntPtr[3];
             try
             {
-                int result = HapNative.hap_decompress_frame(_handle, tinyBuf, 4);
-                Assert.That(result, Is.Not.EqualTo(HapNative.ErrorNone), "Expected non-zero error when buffer is too small");
+                for (int i = 0; i < handles.Length; i++)
+                {
+                    Assert.That(HapNative.Open(HapTestFixtures.Hap1, out handles[i]), Is.EqualTo(HapError.Ok));
+                    Assert.That(handles[i], Is.Not.EqualTo(IntPtr.Zero));
+                }
+
+                int width = HapNative.hap_get_width(handles[0]);
+                int frames = HapNative.hap_get_frame_count(handles[0]);
+                foreach (var h in handles)
+                {
+                    Assert.That(HapNative.hap_get_width(h), Is.EqualTo(width));
+                    Assert.That(HapNative.hap_get_frame_count(h), Is.EqualTo(frames));
+                }
             }
             finally
             {
-                Marshal.FreeHGlobal(tinyBuf);
+                foreach (var h in handles)
+                    if (h != IntPtr.Zero) HapNative.hap_close(h);
             }
         }
 
         [Test]
-        public void HapOpen_MultipleHandles_AllValid()
+        public void DecodeTexture_ConcurrentHandles_ProduceIdenticalBytes()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
+            HapTestFixtures.Require(HapTestFixtures.Hap1);
 
-            IntPtr h1 = IntPtr.Zero;
-            IntPtr h2 = IntPtr.Zero;
-            IntPtr h3 = IntPtr.Zero;
-
+            // Different handles carry no shared state, so two threads may decode at once.
+            IntPtr h1 = IntPtr.Zero, h2 = IntPtr.Zero;
             try
             {
-                h1 = HapNative.hap_open(FixturePath, out int err1);
-                h2 = HapNative.hap_open(FixturePath, out int err2);
-                h3 = HapNative.hap_open(FixturePath, out int err3);
+                Assert.That(HapNative.Open(HapTestFixtures.Hap1, out h1), Is.EqualTo(HapError.Ok));
+                Assert.That(HapNative.Open(HapTestFixtures.Hap1, out h2), Is.EqualTo(HapError.Ok));
 
-                Assert.That(h1, Is.Not.EqualTo(IntPtr.Zero), "Handle 1 should be valid");
-                Assert.That(h2, Is.Not.EqualTo(IntPtr.Zero), "Handle 2 should be valid");
-                Assert.That(h3, Is.Not.EqualTo(IntPtr.Zero), "Handle 3 should be valid");
+                int size = HapNative.hap_get_texture_buffer_size(h1, 0);
+                byte[] a = null, b = null;
+                Exception failure = null;
 
-                Assert.That(err1, Is.EqualTo(HapNative.ErrorNone));
-                Assert.That(err2, Is.EqualTo(HapNative.ErrorNone));
-                Assert.That(err3, Is.EqualTo(HapNative.ErrorNone));
+                // A failed decode throws out of the worker, where NUnit cannot see it, so each
+                // thread hands its exception back to be reported from here.
+                Thread Decoding(IntPtr handle, Action<byte[]> store) => new(() =>
+                {
+                    try { store(HapTestFixtures.DecodeToBytes(handle, 3, 0, size)); }
+                    catch (Exception ex) { Volatile.Write(ref failure, ex); }
+                });
 
-                int w1 = HapNative.hap_get_width(h1);
-                int w2 = HapNative.hap_get_width(h2);
-                int w3 = HapNative.hap_get_width(h3);
-                Assert.That(w2, Is.EqualTo(w1), "All handles should report same width");
-                Assert.That(w3, Is.EqualTo(w1), "All handles should report same width");
+                var t1 = Decoding(h1, bytes => a = bytes);
+                var t2 = Decoding(h2, bytes => b = bytes);
+                t1.Start(); t2.Start();
+                t1.Join(); t2.Join();
 
-                int h1Height = HapNative.hap_get_height(h1);
-                Assert.That(HapNative.hap_get_height(h2), Is.EqualTo(h1Height));
-                Assert.That(HapNative.hap_get_height(h3), Is.EqualTo(h1Height));
-
-                int fc1 = HapNative.hap_get_frame_count(h1);
-                Assert.That(HapNative.hap_get_frame_count(h2), Is.EqualTo(fc1));
-                Assert.That(HapNative.hap_get_frame_count(h3), Is.EqualTo(fc1));
+                Assert.That(failure, Is.Null, $"a decode thread threw: {failure}");
+                Assert.That(b, Is.EqualTo(a));
             }
             finally
             {
                 if (h1 != IntPtr.Zero) HapNative.hap_close(h1);
                 if (h2 != IntPtr.Zero) HapNative.hap_close(h2);
-                if (h3 != IntPtr.Zero) HapNative.hap_close(h3);
             }
         }
 
+        // ── Malformed input ──────────────────────────────────────────────────
+
         [Test]
-        public void HapDecodeFrame_Interleaved_AllSucceed()
+        public void Open_FuzzRegressionInputs_FailCleanly()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
+            var inputs = HapTestFixtures.FuzzRegressions;
+            Assume.That(inputs.Length, Is.GreaterThan(0), "no fuzz regression inputs found");
 
-            int[] sequence = { 0, 15, 5, 29, 1, 14 };
-
-            IntPtr buf = Marshal.AllocHGlobal(frameBufferSize);
-            try
+            foreach (string path in inputs)
             {
-                foreach (int frameIndex in sequence)
-                {
-                    int readBytes = HapNative.hap_read_sample(_handle, frameIndex);
-                    Assert.That(readBytes, Is.GreaterThan(0), $"hap_read_sample failed for frame {frameIndex}");
+                var error = HapNative.Open(path, out IntPtr handle);
+                string name = Path.GetFileName(path);
 
-                    int result = HapNative.hap_decompress_frame(_handle, buf, frameBufferSize);
-                    Assert.That(result, Is.EqualTo(HapNative.ErrorNone), $"hap_decompress_frame failed for frame {frameIndex}");
+                if (handle != IntPtr.Zero)
+                {
+                    // A few of these parse as containers; whatever they claim, the getters and
+                    // the decoder must stay inside the file.
+                    Assert.That(error, Is.EqualTo(HapError.Ok), name);
+                    int size = HapNative.hap_get_texture_buffer_size(handle, 0);
+                    if (size > 0)
+                    {
+                        using var buffer = HapTestFixtures.NativeBuffer(size);
+                        int frames = HapNative.hap_get_frame_count(handle);
+                        for (int i = 0; i < Math.Min(frames, 8); i++)
+                            Assert.DoesNotThrow(() => HapNative.DecodeTexture(handle, i, 0, buffer.Ptr, buffer.Size), name);
+                    }
+                    HapNative.hap_close(handle);
+                }
+                else
+                {
+                    Assert.That(error, Is.Not.EqualTo(HapError.Ok), $"{name} returned no handle but reported success");
                 }
             }
-            finally
-            {
-                Marshal.FreeHGlobal(buf);
-            }
         }
 
         [Test]
-        public void HapDecodeFrame_ThenReDecodesSameFrame_IdenticalOutput()
+        public void Open_TruncatedFixture_FailsWithoutHandle()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
-
-            IntPtr buf1 = Marshal.AllocHGlobal(frameBufferSize);
-            IntPtr buf2 = Marshal.AllocHGlobal(frameBufferSize);
+            HapTestFixtures.Require(HapTestFixtures.Hap1);
+            byte[] full = File.ReadAllBytes(HapTestFixtures.Hap1);
+            string tempFile = Path.GetTempFileName();
             try
             {
-                int readBytes = HapNative.hap_read_sample(_handle, 10);
-                Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for frame 10 (first pass)");
-                int result1 = HapNative.hap_decompress_frame(_handle, buf1, frameBufferSize);
-                Assert.That(result1, Is.EqualTo(HapNative.ErrorNone), "First decompress of frame 10 failed");
-
-                readBytes = HapNative.hap_read_sample(_handle, 10);
-                Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for frame 10 (second pass)");
-                int result2 = HapNative.hap_decompress_frame(_handle, buf2, frameBufferSize);
-                Assert.That(result2, Is.EqualTo(HapNative.ErrorNone), "Second decompress of frame 10 failed");
-
-                for (int i = 0; i < frameBufferSize; i++)
-                {
-                    byte b1 = Marshal.ReadByte(buf1, i);
-                    byte b2 = Marshal.ReadByte(buf2, i);
-                    Assert.That(b2, Is.EqualTo(b1), $"Byte mismatch at offset {i}: decode is not deterministic");
-                }
+                var truncated = new byte[full.Length / 4];
+                Array.Copy(full, truncated, truncated.Length);
+                File.WriteAllBytes(tempFile, truncated);
+                var error = HapNative.Open(tempFile, out IntPtr handle);
+                if (handle != IntPtr.Zero) HapNative.hap_close(handle);
+                Assert.That(handle, Is.EqualTo(IntPtr.Zero));
+                Assert.That(error, Is.Not.EqualTo(HapError.Ok));
             }
             finally
             {
-                Marshal.FreeHGlobal(buf1);
-                Marshal.FreeHGlobal(buf2);
+                if (File.Exists(tempFile)) File.Delete(tempFile);
             }
         }
 
         [Test]
-        public void HapDecodeFrame_FirstAndLastFrame_Succeed()
+        public void Open_EmptyFile_FailsWithoutHandle()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
-
-            IntPtr buf = Marshal.AllocHGlobal(frameBufferSize);
+            string tempFile = Path.GetTempFileName();
             try
             {
-                int readBytes = HapNative.hap_read_sample(_handle, 0);
-                Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for first frame");
-                int result = HapNative.hap_decompress_frame(_handle, buf, frameBufferSize);
-                Assert.That(result, Is.EqualTo(HapNative.ErrorNone), "hap_decompress_frame failed for first frame");
-
-                readBytes = HapNative.hap_read_sample(_handle, 29);
-                Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for last frame");
-                result = HapNative.hap_decompress_frame(_handle, buf, frameBufferSize);
-                Assert.That(result, Is.EqualTo(HapNative.ErrorNone), "hap_decompress_frame failed for last frame");
+                File.WriteAllBytes(tempFile, new byte[0]);
+                var error = HapNative.Open(tempFile, out IntPtr handle);
+                if (handle != IntPtr.Zero) HapNative.hap_close(handle);
+                Assert.That(handle, Is.EqualTo(IntPtr.Zero));
+                Assert.That(error, Is.Not.EqualTo(HapError.Ok));
             }
             finally
             {
-                Marshal.FreeHGlobal(buf);
+                if (File.Exists(tempFile)) File.Delete(tempFile);
             }
         }
 
         [Test]
-        public void HapReadSample_CalledWithoutDecompress_DoesNotCorruptState()
+        public void Open_DirectoryPath_FailsWithoutHandle()
         {
-            Assume.That(File.Exists(FixturePath), "Test fixture not found: " + FixturePath);
-            _handle = HapNative.hap_open(FixturePath, out int _);
-            int frameBufferSize = HapNative.hap_get_frame_buffer_size(_handle);
-
-            int readBytes = HapNative.hap_read_sample(_handle, 5);
-            Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for frame 5");
-
-            readBytes = HapNative.hap_read_sample(_handle, 10);
-            Assert.That(readBytes, Is.GreaterThan(0), "hap_read_sample failed for frame 10");
-
-            IntPtr buf = Marshal.AllocHGlobal(frameBufferSize);
-            try
-            {
-                int result = HapNative.hap_decompress_frame(_handle, buf, frameBufferSize);
-                Assert.That(result, Is.EqualTo(HapNative.ErrorNone),
-                    "hap_decompress_frame should succeed after skipping decompress of frame 5");
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(buf);
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // Robustness
-        // ─────────────────────────────────────────────────────────────────────
-
-        [Test]
-        public void HapOpen_EmptyString_ReturnsError()
-        {
-            IntPtr handle = HapNative.hap_open("", out int err);
-            if (handle != IntPtr.Zero)
-                HapNative.hap_close(handle);
-            Assert.That(handle == IntPtr.Zero || err != HapNative.ErrorNone,
-                "Opening an empty string path should return a null handle or a non-zero error code");
+            var error = HapNative.Open(Path.GetTempPath(), out IntPtr handle);
+            if (handle != IntPtr.Zero) HapNative.hap_close(handle);
+            Assert.That(handle, Is.EqualTo(IntPtr.Zero));
+            Assert.That(error, Is.Not.EqualTo(HapError.Ok));
         }
     }
 }

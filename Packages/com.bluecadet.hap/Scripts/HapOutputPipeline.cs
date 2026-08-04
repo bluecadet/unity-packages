@@ -1,67 +1,81 @@
 using System;
 using System.Threading;
-using Unity.Collections;
 using UnityEngine;
 
 namespace Bluecadet.Hap
 {
     /// <summary>
-    /// Owns the GPU output pipeline for HAP video playback: a ring of texture uploaders,
-    /// a double-buffered RenderTexture pair, and the output blit material.
+    /// Owns the GPU output path for Hap playback: the ring of decode-target textures, a
+    /// double-buffered RenderTexture pair, and the output blit material (V-flip, plus YCoCg
+    /// decode and alpha compositing for the Hap Q variants).
     ///
     /// Double-buffered RTs prevent the D3D12 within-frame write→read hazard: the blit always
     /// targets the write slot while the scene reads the display slot (written last frame).
     /// Call <see cref="SwapBuffers"/> after the scene renders to advance the display slot.
     ///
-    /// The uploader ring prevents a CPU Apply() and a GPU blit from targeting the same
-    /// Texture2D simultaneously: consecutive uploads use different slots.
+    /// The ring's retire window plays the same role on the upload side: a slot's textures are
+    /// not decoded into again until several later frames have been uploaded, so an Apply()
+    /// never lands on a texture the GPU may still be reading.
     /// </summary>
     internal sealed class HapOutputPipeline : IDisposable
     {
-        readonly HapTextureUploader[] _uploaders;
+        static readonly int MainTexId = Shader.PropertyToID("_MainTex");
+        static readonly int AlphaTexId = Shader.PropertyToID("_AlphaTex");
 
-        /// <summary>Double-buffered output RTs. Null if the output shader failed to load.</summary>
+        readonly HapTextureRing _ring;
+
+        readonly HapVariant _variant;
+
+        /// <summary>Double-buffered output RTs. Only built once the pipeline is known valid.</summary>
         readonly RenderTexture[] _rts;
 
-        /// <summary>Blit material (flip + optional YCoCg decode). Null if shader load failed.</summary>
+        /// <summary>Blit material (flip + optional YCoCg/alpha decode).</summary>
         readonly Material _material;
 
         int _displayIndex;
-        int _uploadCount;
         int _lastFrame = -1;
-
-        /// <summary>The most recently used uploader (for RawTexture fallback).</summary>
-        HapTextureUploader _lastUploader;
 
         int _disposed;
 
         /// <summary>
-        /// The RT currently safe to display (front buffer, written last frame).
-        /// Null if the output shader failed to load.
+        /// False when the GPU side could not be set up — the textures are too small for the
+        /// decoder's output, or the output shader is missing from the package. Either way no
+        /// frame would ever reach the screen, so the caller must abandon the open. The reason
+        /// has already been logged.
         /// </summary>
-        public RenderTexture DisplayTexture => _rts?[_displayIndex];
+        public bool IsValid { get; }
 
         /// <summary>
-        /// The most recently uploaded raw Texture2D.
-        /// Useful as a fallback when <see cref="DisplayTexture"/> is null (shader not loaded).
+        /// The textures to decode into, to hand to <see cref="HapFileSession.StartDecoding"/>.
+        /// Only valid while <see cref="IsValid"/>.
         /// </summary>
-        public Texture2D RawTexture => _lastUploader?.Texture ?? _uploaders[0]?.Texture;
+        public HapTextureRing DecodeTarget => _ring;
 
-        /// <param name="uploaderCount">
-        /// Number of uploader slots. Must be at least 2 and typically
-        /// <c>Mathf.Max(2, QualitySettings.maxQueuedFrames + 1)</c>.
+        /// <summary>
+        /// The RT currently safe to display (front buffer, written last frame).
+        /// Only valid while <see cref="IsValid"/>.
+        /// </summary>
+        public RenderTexture DisplayTexture => _rts[_displayIndex];
+
+        /// <param name="textures">Per-texture format and size reported by the native plugin.</param>
+        /// <param name="retireDepth">
+        /// How many frames the GPU may lag behind the main thread — normally
+        /// <c>QualitySettings.maxQueuedFrames</c>. Sizes the ring.
         /// </param>
-        public HapOutputPipeline(int width, int height, HapFormat format, int uploaderCount)
+        public HapOutputPipeline(int width, int height, HapTextureInfo[] textures, int retireDepth)
         {
-            _uploaders = new HapTextureUploader[uploaderCount];
-            for (int i = 0; i < uploaderCount; i++)
-                _uploaders[i] = new HapTextureUploader(width, height, format);
+            _variant = HapVariant.From(textures);
+            _ring = new HapTextureRing(width, height, textures, retireDepth);
+            if (!_ring.IsValid) return;
 
-            string shaderName = format.ShaderName();
+            // The shaders ship inside this package, so a missing one means a broken install.
+            // Playing on without it would show upside-down, undecoded video, so the open fails.
+            string shaderName = _variant.ShaderName;
             var shader = Resources.Load<Shader>(shaderName);
             if (shader == null)
             {
-                Debug.LogError($"[HapOutputPipeline] Output shader '{shaderName}' not found — video will not be flipped");
+                Debug.LogError($"[HapPlayer] Output shader '{shaderName}' is missing from the package; " +
+                               $"video will not play");
                 return;
             }
 
@@ -82,33 +96,41 @@ namespace Bluecadet.Hap
             // uninitialized memory before the first video frame arrives.
             for (int i = 0; i < 2; i++)
                 Graphics.Blit(Texture2D.blackTexture, _rts[i]);
+
+            IsValid = true;
         }
 
         /// <summary>
-        /// Upload <paramref name="frameData"/> to the GPU write slot and blit through the output
-        /// shader (V-flip + optional YCoCg decode). Returns true if a new RT frame was produced;
-        /// returns false for duplicate frames or when the output shader is unavailable.
+        /// Upload the newest decoded frame and blit it through the output shader. Returns true
+        /// if a new RT frame was produced; false for duplicate frames and when nothing has been
+        /// decoded yet.
         ///
         /// The caller must call <see cref="SwapBuffers"/> after the scene has rendered from
         /// <see cref="DisplayTexture"/> so next frame's write slot differs from the display slot.
         /// </summary>
-        public bool Upload(NativeArray<byte> frameData, int frameIndex)
+        public bool Present()
         {
-            if (frameIndex == _lastFrame) return false;
+            if (!_ring.TryAcquire(out var lease)) return false;
 
-            var uploader = _uploaders[_uploadCount % _uploaders.Length];
-            _uploadCount++;
-            uploader.Upload(frameData);
-            _lastUploader = uploader;
-
-            if (_rts != null && _material != null)
+            using (lease)
             {
-                int writeIndex = (_displayIndex + 1) % _rts.Length;
-                Graphics.Blit(uploader.Texture, _rts[writeIndex], _material);
-            }
+                if (lease.FrameIndex == _lastFrame) return false;
 
-            _lastFrame = frameIndex;
-            return _rts != null && _material != null;
+                lease.Apply();
+
+                if (_variant.HasAlphaTexture)
+                    _material.SetTexture(AlphaTexId, lease.AlphaTexture);
+                _material.SetTexture(MainTexId, lease.ColorTexture);
+
+                int writeIndex = (_displayIndex + 1) % _rts.Length;
+                Graphics.Blit(lease.ColorTexture, _rts[writeIndex], _material);
+
+                // Start the slot's retire window before the pin is released, so the decode
+                // thread can never grab it in between.
+                lease.MarkUploaded();
+                _lastFrame = lease.FrameIndex;
+                return true;
+            }
         }
 
         /// <summary>
@@ -116,21 +138,20 @@ namespace Bluecadet.Hap
         /// from <see cref="DisplayTexture"/> to guarantee the write and display slots are always
         /// different resources next frame (D3D12 within-frame hazard prevention).
         /// </summary>
-        public void SwapBuffers()
-        {
-            if (_rts != null)
-                _displayIndex = (_displayIndex + 1) % _rts.Length;
-        }
+        public void SwapBuffers() => _displayIndex = (_displayIndex + 1) % _rts.Length;
 
-        /// <summary>Destroy all GPU resources. Safe to call multiple times.</summary>
+        /// <summary>
+        /// Destroy all GPU resources. Safe to call multiple times. Main thread only, and only
+        /// once the decode thread has stopped — it writes into the ring's textures.
+        /// </summary>
         public void Dispose()
         {
             if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
                 return;
 
-            foreach (var u in _uploaders)
-                u?.Dispose();
+            _ring.Dispose();
 
+            // A pipeline that failed to set up still gets disposed, and never built these.
             if (_rts != null)
             {
                 foreach (var rt in _rts)
@@ -138,20 +159,29 @@ namespace Bluecadet.Hap
                     if (rt != null)
                     {
                         rt.Release();
-                        UnityEngine.Object.Destroy(rt);
+                        DestroyObject(rt);
                     }
                 }
             }
 
             if (_material != null)
-            {
+                DestroyObject(_material);
+        }
+
+        /// <summary>
+        /// Destroy a resource with whichever call the current mode allows — an editor tool or
+        /// an edit-mode preview tears the pipeline down outside play mode.
+        /// </summary>
+        static void DestroyObject(UnityEngine.Object obj)
+        {
 #if UNITY_EDITOR
-                if (!Application.isPlaying)
-                    UnityEngine.Object.DestroyImmediate(_material);
-                else
-#endif
-                    UnityEngine.Object.Destroy(_material);
+            if (!Application.isPlaying)
+            {
+                UnityEngine.Object.DestroyImmediate(obj);
+                return;
             }
+#endif
+            UnityEngine.Object.Destroy(obj);
         }
     }
 }
