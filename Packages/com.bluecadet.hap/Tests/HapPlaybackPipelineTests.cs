@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
@@ -22,7 +23,8 @@ namespace Bluecadet.Hap.Tests
             if (_session != null)
             {
                 _session.BeginTeardown();
-                _session.WaitForTeardown(HapTestFixtures.TimeoutMs);
+                Assert.That(_session.WaitForTeardown(HapTestFixtures.TimeoutMs), Is.True,
+                    "the decode thread did not stop in time");
             }
             _pipeline?.Dispose();
             _pipeline = null;
@@ -128,6 +130,38 @@ namespace Bluecadet.Hap.Tests
                 "the decode thread did not stop in time");
             Assert.That(_session.IsTornDown, Is.True);
             Assert.DoesNotThrow(() => _pipeline.Dispose());
+        }
+
+        [Test]
+        public void WaitForTeardown_WakesOnTheSignal_NotOnAPollTick()
+        {
+            // A session that never opened has nothing for the teardown thread to join or close,
+            // so the background thread's only real cost is getting scheduled at all — the fastest
+            // teardown there is. That makes it the sharpest test of what WaitForTeardown itself
+            // adds on top: a poll wakes on the next 1ms tick after the signal, not on the signal,
+            // so it pays that tick almost every time; an event-based wait does not. Averaged over
+            // many trials the two are worlds apart, which is what keeps this from being flaky on
+            // a loaded machine.
+            const int Iterations = 30;
+            double totalMs = 0;
+
+            for (int i = 0; i < Iterations; i++)
+            {
+                var session = new HapFileSession($"/never/opened-{i}.mov");
+                session.BeginTeardown();
+
+                var clock = Stopwatch.StartNew();
+                bool completed = session.WaitForTeardown(HapTestFixtures.TimeoutMs);
+                clock.Stop();
+
+                Assert.That(completed, Is.True, $"iteration {i} did not tear down in time");
+                totalMs += clock.Elapsed.TotalMilliseconds;
+            }
+
+            double averageMs = totalMs / Iterations;
+            Assert.That(averageMs, Is.LessThan(0.75),
+                $"average wait of {averageMs:F3}ms looks like it is polling on a 1ms tick " +
+                "rather than waking on the teardown thread's signal");
         }
     }
 }
