@@ -1,6 +1,8 @@
 # Bluecadet HAP
 
-Unity package for GPU-compressed HAP video playback. Decodes HAP-encoded MOV files to `Texture2D` with zero GC allocations during steady-state playback.
+Unity package for GPU-compressed Hap video playback. Decodes Hap-encoded MOV
+files directly into `Texture2D` memory with zero GC allocations during
+steady-state playback.
 
 ## Installation
 
@@ -22,7 +24,7 @@ Or add the scoped registry manually to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "com.bluecadet.hap": "0.0.12"
+    "com.bluecadet.hap": "1.1.0"
   }
 }
 ```
@@ -32,17 +34,31 @@ Or add the scoped registry manually to `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.bluecadet.hap": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.hap#hap/v0.0.12"
+    "com.bluecadet.hap": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.hap#hap/v1.1.0"
   }
 }
 ```
 
-Supports HAP (DXT1), HAP Alpha (DXT5), and HAP Q (BC7).
+## Supported formats
+
+| Format | Compression | Alpha |
+|--------|-------------|-------|
+| Hap | DXT1 | — |
+| Hap Alpha | DXT5 | yes |
+| Hap Q | YCoCg DXT5 | — |
+| Hap Q Alpha | YCoCg DXT5 + RGTC1 | yes |
+| Hap R | BC7 | — |
+
+Hap Q Alpha decodes as real transparency: the player uploads two textures per
+frame (YCoCg colour and an RGTC1 alpha plane) and combines them in a decode
+shader. HapA (alpha-only) and Hap HDR (BC6H) are detected but not decoded —
+opening one of those files fails with `HapOpenStatus.UnsupportedFormat`
+rather than producing a broken frame.
 
 ## Usage
 
 1. Add `HapPlayer` component to a GameObject
-2. Set **File Path** to an absolute path to a HAP-encoded `.mov` file
+2. Set **File Path** to an absolute path to a Hap-encoded `.mov` file
 3. Choose a **Render Mode**:
    - **MaterialOverride** — assigns the texture to a Renderer's material (default)
    - **RenderTexture** — blits each frame to an assigned RenderTexture (useful for UI `RawImage` or multi-material setups)
@@ -62,12 +78,58 @@ Supports HAP (DXT1), HAP Alpha (DXT5), and HAP Q (BC7).
 - **GameTime** (default) — uses `Time.deltaTime`, affected by `Time.timeScale`
 - **UnscaledGameTime** — uses `Time.unscaledDeltaTime`, plays even when `Time.timeScale = 0`
 
+### Opening and closing
+
+Opening and closing a file are asynchronous. `OpenAsync`/`CloseAsync` return
+[`Awaitable`](https://docs.unity3d.com/6000.3/Documentation/ScriptReference/Awaitable.html)s
+that complete on the main thread; `Open`/`Close` are fire-and-forget
+equivalents for inspector-driven use, paired with the `Opened` event.
+
+```csharp
+async void PlayAsync(HapPlayer player, string path)
+{
+    OpenResult result = await player.OpenAsync(path);
+    if (result.Success)
+    {
+        player.Play();
+        return;
+    }
+
+    switch (result.Status)
+    {
+        case HapOpenStatus.FileNotFound:
+            Debug.LogError($"No file at {path}");
+            break;
+        case HapOpenStatus.UnsupportedFormat:
+            Debug.LogError($"{path} is not a supported Hap variant");
+            break;
+        default:
+            Debug.LogError($"Could not open {path}: {result.Status}");
+            break;
+    }
+}
+```
+
+Calling `OpenAsync` again while a file is opening or already open supersedes
+the previous call — its await completes with `HapOpenStatus.Superseded`
+rather than throwing. An `OpenAsync` issued while a close is still tearing
+down queues behind it and starts once the teardown lands. Disabling or
+destroying the component completes any pending awaits with
+`HapOpenStatus.Cancelled`. Open and close are main-thread-only calls and
+always complete on the main thread.
+
+`HapOpenStatus` values: `Success`, `Superseded`, `Cancelled`, `InvalidPath`,
+`FileNotFound`, `FileUnreadable`, `NotAVideoFile`, `NoHapTrack`,
+`UnsupportedFormat`, `CorruptVideo`, `OutOfMemory`, `GpuSetupFailed`.
+
 ### Public API
 
 ```csharp
-public Texture2D Texture { get; }    // current decoded frame
+public Texture Texture { get; }      // current decoded frame
 public bool IsPlaying { get; }
 public bool IsOpen { get; }
+public bool IsOpening { get; }
+public bool IsClosing { get; }
 public int FrameCount { get; }
 public float Duration { get; }
 public float Time { get; set; }      // seek by setting
@@ -83,20 +145,33 @@ public HapTimeSource TimeSource { get; set; }
 public float PlaybackSpeed { get; set; }              // clamped >= 0
 public RenderTexture TargetRenderTexture { get; set; }
 
+public static int DecodeThreadCount { get; set; }    // process-wide, see below
+
+public event Action Opened;
 public event Action PlaybackCompleted;
 public event Action PlaybackLooped;
 
 public void Play();
 public void Pause();
-public void Stop();                  // resets to frame 0
-public void Open(string path);      // close current, open new file
+public void Stop();                          // resets to frame 0
+public void Open(string path);                // fire-and-forget open
+public void Close();                          // fire-and-forget close
+public Awaitable<OpenResult> OpenAsync(string path);
+public Awaitable CloseAsync();
 ```
+
+`HapPlayer.DecodeThreadCount` controls how many threads decompress a chunked
+frame's chunks in parallel. It is a process-wide static, not a per-player
+setting: the last assignment wins and applies to every video currently
+playing, from its next chunked frame onward. It reads back `0` until
+assigned, meaning "use the plugin's default" (one thread per hardware thread
+minus the ones the engine needs).
 
 ### Inspector Fields
 
 | Field | Description |
 |-------|-------------|
-| File Path | Absolute path to a HAP `.mov` file |
+| File Path | Absolute path to a Hap `.mov` file |
 | Play On Enable | Start playback automatically in OnEnable |
 | Loop | Loop playback when reaching the end |
 | Render Mode | APIOnly, MaterialOverride, or RenderTexture |
@@ -107,18 +182,40 @@ public void Open(string path);      // close current, open new file
 
 ### Lifecycle
 
-- **OnEnable**: opens file, allocates buffers + texture, starts decode thread, begins playback if `playOnEnable` is true
-- **OnDisable**: stops playback, joins decode thread, frees all native memory and texture
-- **Update**: advances clock, requests background decode, uploads ready frame to texture on main thread
+- **OnEnable**: opens File Path, if set, and begins playback if Play On Enable is set
+- **OnDisable**: stops playback and starts releasing the file; a disabled player's teardown keeps advancing outside its own `Update`, so textures are still released promptly
+- **OnDestroy**: same teardown as OnDisable, with a short bounded wait for the decode thread to park before Unity reclaims the textures
+- **Update**: advances the playback clock, requests the next decode, and uploads the ready frame to texture on the main thread
 
 ## Architecture
 
-Native C plugin handles demux + decode. C# handles playback logic, texture upload, and Unity integration.
+A native Zig plugin demuxes and decodes; C# handles playback timing, texture
+upload, and Unity integration. Frames decompress directly into the texture
+memory the GPU reads from — there is no intermediate CPU-side copy — and the
+file is read through a memory-mapped view rather than buffered reads.
+Opening a file validates the container and decodes its first frame up
+front, so a bad or unsupported file fails at `OpenAsync`/`Open` with a typed
+reason instead of failing partway through playback.
 
 - **HapNative.cs** — P/Invoke bindings
-- **HapFrameRingBuffer.cs** — triple-buffer using `Marshal.AllocHGlobal` (zero GC)
-- **HapTextureUploader.cs** — `Texture2D.LoadRawTextureData(IntPtr)` + `Apply()`
-- **HapPlayer.cs** — MonoBehaviour, playback clock, background decode thread
+- **HapFileSession.cs** — owns one open file: the native handle, the decode thread, and open/decode state
+- **HapOutputPipeline.cs** — texture ring and the blit/property-block output path
+- **HapPlayer.cs** — MonoBehaviour facade: playback clock, rendering, serialized settings
+- **HapLifecycle.cs** — the awaitable open/close state machine behind HapPlayer
+- **HapTeardown.cs** — releases one closed file's decode thread, native handle, and GPU resources
+- **HapMainLoop.cs** — advances lifecycle work for disabled or destroyed players, in and out of play mode
+
+## Errors
+
+An open failure never throws — it reports a typed `HapOpenStatus` through
+`OpenResult` (for `OpenAsync`/awaited callers) and a log message (for
+`Open`/inspector-driven callers). A decode failure during playback is logged
+with the specific error the native plugin returned.
+
+## Known limitations
+
+- **Non-ASCII file paths on Windows are unsupported.** The native plugin opens files through the ANSI Win32 file API on Windows; paths outside the current ANSI code page will fail to open.
+- **A disabled player that is never re-enabled may defer its final teardown.** Outside play mode, `HapPlayer` relies on the editor's update loop to finish releasing a disabled player's native resources; if the editor update loop doesn't run again (e.g. the editor is left idle), that release is deferred until it does.
 
 ## Building the Native Plugin
 
@@ -160,17 +257,30 @@ cd Native~
 zig build -p ../Plugins -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
 ```
 
+Run the native test suite with:
+```bash
+cd Native~
+zig build test
+```
+
+Set `HAP_FUZZ_SECONDS` to also run the bounded, time-boxed fuzz loops against
+the demuxer and decoder (skipped by default on a plain `zig build test`):
+```bash
+HAP_FUZZ_SECONDS=30 zig build test
+```
+
 ## Vendor Libraries
 
-All under `Native~/vendor/`. The native build compiles the vendored source directly with Zig.
+All under `Native~/vendor/`. The native build compiles the vendored source directly with Zig. Frame decode itself is a first-party implementation (`Native~/src/core/hap_decode.zig`), not vendored code.
 
 | Library | Source | License |
 |---------|--------|---------|
-| [minimp4](https://github.com/lieff/minimp4) | Header-only MOV/MP4 demuxer | CC0 |
-| [hap](https://github.com/Vidvox/hap) | HAP reference codec | BSD-2-Clause |
-| [snappy](https://github.com/google/snappy) | Google's official Snappy compression library | BSD-3-Clause |
+| [minimp4](https://github.com/lieff/minimp4) | Header-only MOV/MP4 demuxer (hardened fork, see `Native~/vendor/README.md`) | CC0 |
+| [snappy](https://github.com/google/snappy) | Google's official Snappy compression library, version 1.2.2 | BSD-3-Clause |
+
+Full license texts are under `Native~/vendor/licenses/`.
 
 ### Known quirks
 
-- **minimp4 + large files**: `MINIMP4_ALLOW_64BIT` must be defined before including `minimp4.h` or files over ~4GB will fail to parse. This is set in `hap_demux.c`.
-- **minimp4 + HAP codec**: minimp4 doesn't recognize HAP sample entry FourCCs (`Hap1`, `HapY`, `HapM`, `HapA`) so it won't parse video dimensions from the stsd box. Additionally, QuickTime MOVs with two `hdlr` boxes per track (media handler + data handler) cause minimp4 to store the data handler type (`url `) instead of `vide`. The demuxer works around both issues by parsing the stsd VisualSampleEntry directly from the moov atom.
+- **minimp4 + large files**: `MINIMP4_ALLOW_64BIT` must be defined before including `minimp4.h` or files over ~4GB will fail to parse. This is set in `vendor/minimp4/minimp4.c`.
+- **minimp4 + HAP codec**: minimp4 doesn't recognize HAP sample entry FourCCs (`Hap1`, `HapY`, `HapM`, `HapA`) so it won't parse video dimensions from the stsd box. Additionally, QuickTime MOVs with two `hdlr` boxes per track (media handler + data handler) cause minimp4 to store the data handler type (`url `) instead of `vide`. The demuxer (`Native~/src/core/demuxer.zig`) works around both issues by parsing the stsd VisualSampleEntry directly from the moov atom.
