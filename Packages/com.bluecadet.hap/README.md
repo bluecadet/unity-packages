@@ -205,6 +205,65 @@ reason instead of failing partway through playback.
 - **HapTeardown.cs** — releases one closed file's decode thread, native handle, and GPU resources
 - **HapMainLoop.cs** — advances lifecycle work for disabled or destroyed players, in and out of play mode
 
+## Performance with many concurrent players
+
+The bottleneck for playing many videos at once is main-thread texture
+upload, not disk I/O or decode. Each concurrent 4K Hap Q player costs
+roughly **0.77 ms of main-thread time per frame** — almost entirely the
+`Texture2D.Apply` memcpy of one decoded frame into GPU-visible memory. Cost
+is dominated by frame byte size, so 1080p (a quarter of the pixels) costs
+substantially less — extrapolating, a little over a quarter as much, since
+a small fixed per-upload overhead doesn't shrink with resolution. Disk and
+decode did not bind in testing; budget against upload.
+
+**Average frame time understates the load.** If your content's frame rate
+divides evenly into your display's refresh rate but doesn't match it (30 fps
+content at 60 Hz is the common case), each player only uploads on half the
+ticks — and by default every player picks the *same* half, because they all
+start at time 0. That packs N uploads onto every other tick and none onto
+the ticks in between, so the ticks that do work run at roughly double the
+per-player cost your average would suggest. Measured on 4K Hap Q at N=16,
+mean main-thread work reports ~49% of a 60 Hz frame budget while the busy
+ticks already consume the entire budget. At N=24, half of all frames
+overran the budget even though the reported average was ~69%. Size your
+player count against worst-case (p99) frame time, not the mean.
+
+### Staggering playback to spread uploads
+
+Phase-offsetting each player's start time spreads uploads across the
+content's frame period instead of bunching them on the same tick. Seek each
+player before starting playback:
+
+```csharp
+for (int i = 0; i < players.Count; i++)
+{
+    HapPlayer player = players[i];
+    await player.OpenAsync(path);
+    player.Time = (i / (float)players.Count) * (1f / player.FrameRate);
+    player.Play();
+}
+```
+
+Measured on 4K Hap Q at N=24, staggered against in-phase: frames overrunning
+the 60 Hz budget dropped from ~50% to under 1%, and p99 main-thread work
+roughly halved. The trade is that total main-thread work across all players
+rises 10-26% — staggering costs more in aggregate than it saves; it buys a
+flatter, more predictable per-frame load rather than a lower one. Dropped
+frames and delivered frame counts were unaffected in either arm.
+
+**When not to use this.** Staggering introduces up to one content frame of
+phase skew between players (33 ms at 30 fps). That's invisible when each
+player drives an independent screen, but it's a visible seam if a single
+image spans multiple displays, or if content is deliberately frame-locked
+across players. Apply it only where players are allowed to drift out of
+phase with each other.
+
+**Limitations of these numbers.** Measured on macOS/Metal (Apple M4 Pro);
+not verified on Windows/D3D12. Measured with a warm OS page cache. All
+players in testing opened the same file, so file reads shared one
+page-cache entry — deployments where each player opens a distinct file may
+hit a disk bottleneck this testing did not exercise.
+
 ## Errors
 
 An open failure never throws — it reports a typed `HapOpenStatus` through
