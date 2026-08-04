@@ -14,15 +14,15 @@ Shader "Hidden/Bluecadet/HapFlip"
             #pragma vertex vert_img
             #pragma fragment frag
             #include "UnityCG.cginc"
+            #include "../HapDecode.cginc"
 
             sampler2D _MainTex;
 
-            // HAP DXT data is stored top-to-bottom, left-to-right (standard video convention).
-            // Unity's LoadRawTextureData treats raw DXT as bottom-to-top (OpenGL convention),
-            // producing a 180° rotation. We correct that here.
+            // Hap / Hap Alpha / Hap R need no colour decode: the block-compressed texture is
+            // already RGBA, so this only corrects the DXT orientation.
             fixed4 frag(v2f_img i) : SV_Target
             {
-                return tex2D(_MainTex, float2(i.uv.x, 1.0 - i.uv.y));
+                return tex2D(_MainTex, HapFlipUV(i.uv));
             }
             ENDCG
         }
