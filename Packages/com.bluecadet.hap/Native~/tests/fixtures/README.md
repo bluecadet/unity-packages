@@ -141,8 +141,8 @@ exporter produces one.
 
 ## Golden-frame regression tests
 
-Byte-exact golden-frame tests live in `src/core/hap_decode.zig` and run via
-`zig build test`. Three layers:
+Byte-exact golden-frame tests live in `src/core/hap_decode_test.zig` and run
+via `zig build test`. Three layers:
 
 1. **Per-codec fixture decode** (`decodeTexture per-codec fixtures decode to
    the expected format and byte count`): demux each real `.mov` fixture,
