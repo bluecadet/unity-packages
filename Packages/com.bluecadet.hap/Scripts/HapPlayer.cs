@@ -96,6 +96,19 @@ namespace Bluecadet.Hap
         MaterialPropertyBlock _mpb;
         static readonly int MainTexId = Shader.PropertyToID("_MainTex");
 
+        /// <summary>
+        /// What <see cref="RenderFrame"/> last acted on, so a tick where none of it moved can
+        /// skip the blit / property-block round trip entirely instead of repeating it for
+        /// nothing every frame — the point of this whole cache.
+        /// </summary>
+        Texture _lastRenderedTexture;
+        HapRenderMode _lastRenderMode;
+        Renderer _lastTargetRenderer;
+        RenderTexture _lastTargetRenderTexture;
+
+        /// <summary>Test seam: counts calls to <see cref="RenderFrame"/> that did real GPU work.</summary>
+        internal int RenderWorkCount { get; private set; }
+
         // ── Profiler markers ─────────────────────────────────────────────────
 
         const float k_PlaybackSpeedEpsilon = 1e-5f;
@@ -480,11 +493,35 @@ namespace Bluecadet.Hap
             return pipeline.Present();
         }
 
-        /// <summary>Put the current frame wherever <see cref="RenderMode"/> says it goes.</summary>
+        /// <summary>
+        /// Put the current frame wherever <see cref="RenderMode"/> says it goes — skipped when
+        /// none of that has changed since the last call, so a paused video or one whose frame
+        /// rate is below the display's does not repeat a full-resolution blit or a
+        /// GetPropertyBlock/SetPropertyBlock round trip every single tick for nothing.
+        ///
+        /// Dirty is "the displayed texture, the render mode, or the target changed" — which also
+        /// covers the first frame after opening (texture goes from null to something) and a
+        /// reopen at a different size (a new pipeline means a new texture). It does not cover a
+        /// third party clobbering the target behind this component's back — resetting the
+        /// renderer's property block or drawing into the target RenderTexture itself — since
+        /// nothing here changed to notice; that is an accepted limitation, not re-asserted every
+        /// frame.
+        /// </summary>
         void RenderFrame()
         {
             var tex = Texture;
             if (tex == null) return;
+
+            bool unchanged = tex == _lastRenderedTexture
+                              && renderMode == _lastRenderMode
+                              && targetRenderer == _lastTargetRenderer
+                              && targetRenderTexture == _lastTargetRenderTexture;
+            if (unchanged) return;
+
+            _lastRenderedTexture = tex;
+            _lastRenderMode = renderMode;
+            _lastTargetRenderer = targetRenderer;
+            _lastTargetRenderTexture = targetRenderTexture;
 
             switch (renderMode)
             {
@@ -494,10 +531,14 @@ namespace Bluecadet.Hap
                     targetRenderer.GetPropertyBlock(_mpb);
                     _mpb.SetTexture(MainTexId, tex);
                     targetRenderer.SetPropertyBlock(_mpb);
+                    RenderWorkCount++;
                     break;
                 case HapRenderMode.RenderTexture:
                     if (targetRenderTexture != null)
+                    {
                         Graphics.Blit(tex, targetRenderTexture);
+                        RenderWorkCount++;
+                    }
                     break;
                 case HapRenderMode.APIOnly:
                     break;
