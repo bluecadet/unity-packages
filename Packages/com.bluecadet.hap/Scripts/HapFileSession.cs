@@ -76,14 +76,22 @@ namespace Bluecadet.Hap
         bool _teardownStarted;
 
         /// <summary>
-        /// Set by the teardown thread as its last act. A plain flag rather than an event:
-        /// nothing here is disposable, so the owner can drop the session the moment it reads
-        /// true without ever racing the signal.
+        /// Set by the teardown thread right after it signals <see cref="_teardownComplete"/>, so
+        /// a true read here always means the signal already happened.
         /// </summary>
         volatile bool _tornDown;
 
         /// <summary>True once the decode thread has parked and the native handle is closed.</summary>
         public bool IsTornDown => _tornDown;
+
+        /// <summary>
+        /// Lets <see cref="WaitForTeardown"/> block on the teardown thread's signal instead of
+        /// polling for it. Deliberately never disposed: it may never be waited on at all — most
+        /// teardowns are just watched via <see cref="IsTornDown"/> — so allocating a kernel
+        /// handle lazily and reclaiming it via the finalizer on the wrapped <c>SafeHandle</c>
+        /// costs less than the race disposing it here would risk.
+        /// </summary>
+        readonly ManualResetEventSlim _teardownComplete = new(false);
 
         // ── Profiler markers ─────────────────────────────────────────────────
 
@@ -348,23 +356,37 @@ namespace Bluecadet.Hap
 
             var teardownThread = new Thread(() =>
             {
-                // The open thread may still be memory-mapping the file, and it hands back a
-                // handle nobody consumed — that one is ours to close too.
-                openThread?.Join();
-                var unconsumed = _pendingOpenResult;
-                _pendingOpenResult = null;
-                if (unconsumed != null && unconsumed.Handle != IntPtr.Zero && unconsumed.Handle != handle)
-                    HapNative.hap_close(unconsumed.Handle);
+                try
+                {
+                    // The open thread may still be memory-mapping the file, and it hands back a
+                    // handle nobody consumed — that one is ours to close too.
+                    openThread?.Join();
+                    var unconsumed = _pendingOpenResult;
+                    _pendingOpenResult = null;
+                    if (unconsumed != null && unconsumed.Handle != IntPtr.Zero && unconsumed.Handle != handle)
+                        HapNative.hap_close(unconsumed.Handle);
 
-                // The decode thread only has to finish the frame in flight. Joining it is what
-                // makes closing the handle safe: it can no longer be inside a decode call, and
-                // it can no longer be writing into the ring's textures.
-                decodeThread?.Join();
+                    // The decode thread only has to finish the frame in flight. Joining it is what
+                    // makes closing the handle safe: it can no longer be inside a decode call, and
+                    // it can no longer be writing into the ring's textures.
+                    decodeThread?.Join();
 
-                if (handle != IntPtr.Zero)
-                    HapNative.hap_close(handle);
-
-                _tornDown = true;
+                    if (handle != IntPtr.Zero)
+                        HapNative.hap_close(handle);
+                }
+                catch (Exception ex)
+                {
+                    // Unhandled here would take the whole process down under IL2CPP; a waiter
+                    // missing its wakeup is recoverable, a crash is not.
+                    Debug.LogError($"[HapPlayer] Teardown of '{FilePath}' failed: {ex}");
+                }
+                finally
+                {
+                    // Signalled before the flag is set, so a caller that observes _tornDown has
+                    // never raced this Set — it has strictly already happened.
+                    _teardownComplete.Set();
+                    _tornDown = true;
+                }
             })
             {
                 IsBackground = true,
@@ -382,13 +404,9 @@ namespace Bluecadet.Hap
         {
             if (_tornDown) return true;
 
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            while (clock.ElapsedMilliseconds < timeoutMs)
-            {
-                if (_tornDown) return true;
-                Thread.Sleep(1);
-            }
-            return _tornDown;
+            // Blocks on the teardown thread's signal rather than polling for it, so this returns
+            // the moment the join/close finishes instead of paying up to a full tick of Sleep(1).
+            return timeoutMs > 0 && _teardownComplete.Wait(timeoutMs);
         }
     }
 }
