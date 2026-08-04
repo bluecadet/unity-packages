@@ -1,5 +1,51 @@
 namespace Bluecadet.Hap
 {
+    /// <summary>What the decode thread should do next.</summary>
+    internal enum DecodeRequestKind
+    {
+        /// <summary>Decode the frame the main thread asked for.</summary>
+        Decode,
+
+        /// <summary>Speculatively decode a frame ahead of the main thread asking for it.</summary>
+        Prefetch,
+
+        /// <summary>The requested frame is already in the ring — nothing to decode this pass.</summary>
+        Skip,
+
+        /// <summary>Everything is decoded; park until the main thread asks for another frame.</summary>
+        Wait,
+    }
+
+    /// <summary>One instruction from the <see cref="DecodeScheduler"/> to the decode thread.</summary>
+    internal readonly struct DecodeRequest
+    {
+        public readonly DecodeRequestKind Kind;
+
+        /// <summary>Frame to decode. Only meaningful for Decode and Prefetch.</summary>
+        public readonly int Frame;
+
+        DecodeRequest(DecodeRequestKind kind, int frame)
+        {
+            Kind = kind;
+            Frame = frame;
+        }
+
+        /// <summary>Decode this frame in response to the main thread's request.</summary>
+        public static DecodeRequest ToDecode(int frame) => new(DecodeRequestKind.Decode, frame);
+
+        /// <summary>Decode this frame speculatively, before the main thread asks for it.</summary>
+        public static DecodeRequest ToPrefetch(int frame) => new(DecodeRequestKind.Prefetch, frame);
+
+        /// <summary>The requested frame is already in the ring.</summary>
+        public static readonly DecodeRequest Skip = new(DecodeRequestKind.Skip, -1);
+
+        /// <summary>Nothing to decode until the main thread asks for another frame.</summary>
+        public static readonly DecodeRequest Wait = new(DecodeRequestKind.Wait, -1);
+
+        /// <summary>True when the frame was chosen speculatively rather than requested.</summary>
+        public bool IsPrefetch => Kind == DecodeRequestKind.Prefetch;
+    }
+
     /// <summary>
     /// Determines which frame the decode thread should decode next based on
     /// the main thread's most recent request and the thread's own decode history.
@@ -25,13 +71,8 @@ namespace Bluecadet.Hap
         /// <summary>
         /// Given the main thread's current request and playback direction, returns
         /// what the decode thread should do next.
-        ///
-        /// Returns (target, isPrefetch, shouldBlock):
-        ///   target == -1, shouldBlock == false  → requested frame already in ring buffer; skip decode
-        ///   target >= 0,  shouldBlock == false  → decode this frame (isPrefetch indicates speculative)
-        ///   target == -1, shouldBlock == true   → nothing to do; caller should block on the decode lock
         /// </summary>
-        public (int target, bool isPrefetch, bool shouldBlock) Next(int requested, int dir)
+        public DecodeRequest Next(int requested, int dir)
         {
             if (requested != _lastExplicit)
             {
@@ -43,23 +84,22 @@ namespace Bluecadet.Hap
                                   requested == (_lastExplicit + dir + _frameCount) % _frameCount;
                     _lastExplicit = requested;
                     _prefetchDone = !wasSeq;
-                    return (-1, false, false);
+                    return DecodeRequest.Skip;
                 }
 
                 // Decode this frame in response to the main-thread request.
-                return (requested, false, false);
+                return DecodeRequest.ToDecode(requested);
             }
 
             if (!_prefetchDone && _lastDecoded >= 0 && _frameCount > 1)
             {
                 // Caught up with the main thread. Speculatively decode the next sequential
                 // frame so it is ready before the main thread asks for it.
-                int prefetchTarget = (_lastDecoded + dir + _frameCount) % _frameCount;
-                return (prefetchTarget, true, false);
+                return DecodeRequest.ToPrefetch((_lastDecoded + dir + _frameCount) % _frameCount);
             }
 
             // Prefetch done (or not applicable). Block until main thread requests a new frame.
-            return (-1, false, true);
+            return DecodeRequest.Wait;
         }
 
         /// <summary>
