@@ -11,8 +11,11 @@
 //!    `HapError` enum; `HAP_OK` (0) is success. Getters return 0 for a null
 //!    or unopened handle rather than an error code.
 //!  * A handle owns everything reachable from it (the mmap of the file, the
-//!    cached sample table, the decode scratch buffer). `hap_close` releases
-//!    all of it; passing null is a no-op.
+//!    cached sample table). `hap_close` releases all of it; passing null is
+//!    a no-op.
+//!  * Decoding is zero-copy into the caller's memory: `hap_decode_texture`
+//!    hands the decoder the caller's buffer as its output storage, so the
+//!    decoded bytes are never staged through an intermediate buffer.
 //!  * Per-handle calls must be serialized by the caller -- the intended use
 //!    is one decode thread per open file, which is what the C# layer does.
 //!    Different handles may be used concurrently from different threads with
@@ -39,9 +42,12 @@ const HapTextureFormat = core.hap_frame.HapTextureFormat;
 
 /// Everything a handle owns comes from here. libc's allocator is thread-safe
 /// (handles are independent and may be driven from different threads) and
-/// needs no process-wide state of its own; test builds swap in the testing
-/// allocator so the suite fails on a leaked handle.
-const allocator: std.mem.Allocator = if (builtin.is_test)
+/// needs no process-wide state of its own; test builds start from the
+/// testing allocator so the suite fails on a leaked handle, and swap in an
+/// accounting wrapper where a test needs to see what was allocated. Decoded
+/// texture data never comes from here -- it goes straight into the caller's
+/// buffer (see `hap_decode_texture`).
+pub var allocator: std.mem.Allocator = if (builtin.is_test)
     std.testing.allocator
 else
     std.heap.c_allocator;
@@ -147,10 +153,6 @@ pub const Handle = struct {
     formats: [max_textures]HapTextureFormat,
     buffer_sizes: [max_textures]u32,
 
-    /// Decode destination, reused across frames so a steady-state decode
-    /// loop does no allocation.
-    scratch: std.ArrayListUnmanaged(u8) = .empty,
-
     /// Last demuxed sample, kept so decoding texture 1 of a Hap Q Alpha
     /// frame right after texture 0 doesn't walk the sample table again.
     /// Negative when nothing is cached.
@@ -167,7 +169,6 @@ pub const Handle = struct {
 
     fn destroy(self: *Handle) void {
         const alloc = self.alloc; // copied out: `self` is gone by the last line
-        self.scratch.deinit(alloc);
         self.demux.deinit(alloc);
         self.reader.deinit();
         alloc.destroy(self);
@@ -324,7 +325,81 @@ pub export fn hap_get_texture_buffer_size(handle: ?*Handle, tex_index: i32) i32 
 // Decode.
 // -----------------------------------------------------------------------
 
-/// Decode texture `tex_index` of frame `frame_index` into `buf`.
+/// Allocator that forwards to `backing` but treats one caller-owned region
+/// -- the output buffer handed to `hap_decode_texture` -- as immovable.
+///
+/// The decoder writes its output through an `ArrayListUnmanaged(u8)`, so
+/// handing it a list whose capacity *is* the caller's buffer makes the
+/// decode land straight in that buffer with no allocation and no copy
+/// (`ensureTotalCapacity` returns immediately while `capacity >= new_len`).
+/// The one hazard is a frame that decodes to more than the caller promised:
+/// the list would then try to grow, i.e. `remap`/`free` a pointer the
+/// backing allocator never handed out. This wrapper answers those two calls
+/// itself for the caller's region (refuse to grow it, ignore frees of it),
+/// which turns that case into an ordinary heap allocation the caller's
+/// buffer is untouched by -- detected afterwards and reported as
+/// HAP_ERROR_BUFFER_TOO_SMALL.
+///
+/// A plain FixedBufferAllocator can't do this job: `ensureTotalCapacity`
+/// asks for `growCapacity(n)` == n * 1.5 + 64 bytes, so an exactly-sized
+/// caller buffer would always come up short.
+///
+/// One caveat this can't cover: `Allocator.free` fills the region with
+/// `undefined` before dispatching to the vtable, so on the grow path (i.e.
+/// a frame too big for the caller's buffer) a safety-checked build will
+/// have poisoned the caller's bytes by the time this wrapper gets to ignore
+/// the free. That only happens on the HAP_ERROR_BUFFER_TOO_SMALL path,
+/// where the buffer's contents are documented as unspecified.
+const CallerBuffer = struct {
+    backing: std.mem.Allocator,
+    region: []u8,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *CallerBuffer) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn owns(self: *const CallerBuffer, ptr: [*]u8) bool {
+        return @intFromPtr(ptr) >= @intFromPtr(self.region.ptr) and
+            @intFromPtr(ptr) < @intFromPtr(self.region.ptr) + self.region.len;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CallerBuffer = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CallerBuffer = @ptrCast(@alignCast(ctx));
+        // The caller's region can shrink in place (nothing moves) but never
+        // grow past what the caller promised.
+        if (self.owns(memory.ptr)) return new_len <= memory.len;
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CallerBuffer = @ptrCast(@alignCast(ctx));
+        if (self.owns(memory.ptr)) return if (new_len <= memory.len) memory.ptr else null;
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CallerBuffer = @ptrCast(@alignCast(ctx));
+        if (self.owns(memory.ptr)) return; // not ours to release
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+/// Decode texture `tex_index` of frame `frame_index` straight into `buf`.
+/// On any error result `buf`'s contents are unspecified (a rejected frame
+/// may already have been partially decoded into it), but nothing is ever
+/// written past `buf_size`.
 pub export fn hap_decode_texture(
     handle: ?*Handle,
     frame_index: i32,
@@ -340,13 +415,27 @@ pub export fn hap_decode_texture(
 
     const data = h.sample(@intCast(frame_index)) orelse return code(.frame_out_of_range);
 
-    _ = core.hap_decode.decodeTexture(allocator, data, @intCast(tex_index), &h.scratch) catch |err|
+    const capacity: usize = @intCast(buf_size);
+    var guard: CallerBuffer = .{ .backing = allocator, .region = dst[0..capacity] };
+    const guarded = guard.allocator();
+
+    // The output list *is* the caller's buffer: empty, with the buffer as
+    // its capacity. Nothing is allocated and nothing is copied unless the
+    // frame turns out to be larger than the caller promised.
+    var out: std.ArrayListUnmanaged(u8) = .{ .items = dst[0..0], .capacity = capacity };
+    // Only release the list when it holds memory of its own: `Allocator.free`
+    // fills a freed region with `undefined` *before* it reaches the vtable,
+    // so freeing the caller's buffer would scribble over the very bytes the
+    // caller asked for (in a safety-checked build).
+    defer if (out.items.ptr != dst) out.deinit(guarded);
+
+    _ = core.hap_decode.decodeTexture(guarded, data, @intCast(tex_index), &out) catch |err|
         return code(errorCode(err));
 
-    const decoded = h.scratch.items;
-    if (decoded.len > @as(usize, @intCast(buf_size))) return code(.buffer_too_small);
+    // The list only moves off the caller's buffer when the decoded texture
+    // doesn't fit in it.
+    if (out.items.ptr != dst) return code(.buffer_too_small);
 
-    @memcpy(dst[0..decoded.len], decoded);
     return code(.ok);
 }
 

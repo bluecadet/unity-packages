@@ -260,6 +260,137 @@ test "hap_decode_texture rejects bad frames, textures and buffers" {
     );
 }
 
+/// Counts bytes handed out by the plugin's internal allocator, so a test can
+/// prove a decode never allocates a staging buffer for the texture.
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    allocated: usize = 0,
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawAlloc(len, alignment, ra);
+        if (p != null) self.allocated += len;
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawRemap(memory, alignment, new_len, ra);
+        if (p != null and new_len > memory.len) self.allocated += new_len - memory.len;
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+test "decoding allocates nothing for the texture payload itself" {
+    var counter: CountingAllocator = .{ .backing = testing.allocator };
+    const previous = abi.allocator;
+    abi.allocator = counter.allocator();
+    defer abi.allocator = previous;
+
+    for ([_][:0]const u8{
+        "tests/fixtures/hapy.mov", // single Snappy block
+        "tests/fixtures/hapy_chunked.mov", // Complex: parallel chunk decode
+        "tests/fixtures/hapm.mov", // two textures out of one sample
+    }) |path| {
+        const handle = try openFixtureHandle(path);
+        defer abi.hap_close(handle);
+
+        var tex: i32 = 0;
+        while (tex < abi.hap_get_texture_count(handle)) : (tex += 1) {
+            const size: usize = @intCast(abi.hap_get_texture_buffer_size(handle, tex));
+            const buf = try testing.allocator.alloc(u8, size);
+            defer testing.allocator.free(buf);
+
+            counter.allocated = 0;
+            try testing.expectEqual(
+                ok(.ok),
+                abi.hap_decode_texture(handle, 0, tex, buf.ptr, @intCast(size)),
+            );
+
+            // Only the chunk-plan array (a few hundred bytes at most) may be
+            // allocated; a staging buffer for the decoded texture would show
+            // up here as a `size`-sized allocation.
+            try testing.expect(counter.allocated < size / 16);
+        }
+    }
+}
+
+test "hap_decode_texture writes into the caller's buffer, not past it" {
+    // Decode into the middle of a larger allocation with guard bytes on
+    // either side: the decoder is handed only the inner slice, so any write
+    // outside it (or a stray free of caller memory) shows up here.
+    const guard_len = 4096;
+    for ([_][:0]const u8{
+        "tests/fixtures/hap1.mov", // single Snappy block
+        "tests/fixtures/hap1_chunked.mov", // Complex/chunked, parallel chunks
+    }) |path| {
+        const handle = try openFixtureHandle(path);
+        defer abi.hap_close(handle);
+
+        const size: usize = @intCast(abi.hap_get_texture_buffer_size(handle, 0));
+        const backing = try testing.allocator.alloc(u8, size + 2 * guard_len);
+        defer testing.allocator.free(backing);
+        @memset(backing, 0xA5);
+
+        const target = backing[guard_len..][0..size];
+        try testing.expectEqual(
+            ok(.ok),
+            abi.hap_decode_texture(handle, 0, 0, target.ptr, @intCast(size)),
+        );
+
+        try testing.expect(hasContent(target));
+        for (backing[0..guard_len]) |b| try testing.expectEqual(@as(u8, 0xA5), b);
+        for (backing[guard_len + size ..]) |b| try testing.expectEqual(@as(u8, 0xA5), b);
+    }
+}
+
+test "a too-small buffer is refused for chunked frames without leaking or overrunning" {
+    // The undersized case is the one where the decoder's output can no
+    // longer live in the caller's buffer: it must fall back to memory of its
+    // own and release it (the testing allocator fails the test otherwise)
+    // rather than growing the caller's. The buffer's *contents* are
+    // explicitly unspecified after an error, so only its bounds are checked
+    // here -- via guard bytes on either side.
+    const handle = try openFixtureHandle("tests/fixtures/hapy_chunked.mov");
+    defer abi.hap_close(handle);
+
+    const guard_len = 1024;
+    const half: usize = @as(usize, @intCast(abi.hap_get_texture_buffer_size(handle, 0))) / 2;
+    const backing = try testing.allocator.alloc(u8, half + 2 * guard_len);
+    defer testing.allocator.free(backing);
+    @memset(backing, 0x5A);
+
+    const small = backing[guard_len..][0..half];
+    try testing.expectEqual(
+        ok(.buffer_too_small),
+        abi.hap_decode_texture(handle, 0, 0, small.ptr, @intCast(small.len)),
+    );
+
+    for (backing[0..guard_len]) |b| try testing.expectEqual(@as(u8, 0x5A), b);
+    for (backing[guard_len + half ..]) |b| try testing.expectEqual(@as(u8, 0x5A), b);
+}
+
 test "hap_set_thread_count retunes chunk decode without changing its output" {
     try testing.expectEqual(ok(.invalid_argument), abi.hap_set_thread_count(0));
     try testing.expectEqual(ok(.invalid_argument), abi.hap_set_thread_count(-4));

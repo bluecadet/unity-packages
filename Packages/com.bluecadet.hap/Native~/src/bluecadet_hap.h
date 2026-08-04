@@ -9,9 +9,11 @@
  * --------
  *  * Fallible calls return an int32_t HapError code; HAP_OK (0) is success.
  *    Getters return 0 for a NULL handle instead of an error code.
- *  * A handle owns everything reachable from it (the file mapping, the
- *    sample table, the decode scratch buffer). hap_close() frees all of it
- *    and accepts NULL.
+ *  * A handle owns everything reachable from it (the file mapping and the
+ *    sample table). hap_close() frees all of it and accepts NULL.
+ *  * Decoding is zero-copy into the caller's memory: hap_decode_texture()
+ *    decompresses straight into the buffer you pass, with no intermediate
+ *    staging buffer, so that buffer can be mapped GPU/texture memory.
  *  * Calls on one handle must be serialized by the caller (the intended
  *    use is a single decode thread per open file). Different handles may
  *    be used concurrently from different threads with no coordination.
@@ -117,9 +119,14 @@ HAP_EXPORT int32_t hap_get_texture_buffer_size(HapHandle *h, int32_t tex_index);
 
 /* Decode texture tex_index of frame frame_index into buf.
  *
- * buf_size must be at least hap_get_texture_buffer_size(h, tex_index);
- * a larger buffer is fine (only the decoded bytes are written) and a
- * smaller one returns HAP_ERROR_BUFFER_TOO_SMALL without touching buf.
+ * The texture is decompressed directly into buf -- no intermediate copy --
+ * so buf may be GPU-visible staging memory.
+ *
+ * buf_size must be at least hap_get_texture_buffer_size(h, tex_index); a
+ * larger buffer is fine (only the decoded bytes are written), and a frame
+ * that doesn't fit returns HAP_ERROR_BUFFER_TOO_SMALL. On any error result
+ * buf's contents are unspecified -- a rejected frame may already have been
+ * partially decoded into it -- but nothing is ever written past buf_size.
  * For Hap Q Alpha, decoding texture 0 then texture 1 of the same frame
  * reuses the sample read for the first call. */
 HAP_EXPORT int32_t hap_decode_texture(HapHandle *h, int32_t frame_index,
