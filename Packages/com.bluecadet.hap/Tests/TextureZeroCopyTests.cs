@@ -69,10 +69,20 @@ namespace Bluecadet.Hap.Tests
             }
         }
 
-        [Test]
-        public void GetRawTextureData_Pointer_IsStableAcrossApply()
+        /// <summary>
+        /// Both construction paths must hold: the default zero-filled texture (what every
+        /// non-HAP caller still gets), and the uninitialized one HapTextureRing now requests
+        /// on its own open path.
+        /// </summary>
+        static Texture2D MakeTexture(bool createUninitialized) =>
+            new(Width, Height, TextureFormat.DXT1, mipChain: false, linear: false,
+                createUninitialized: createUninitialized);
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void GetRawTextureData_Pointer_IsStableAcrossApply(bool createUninitialized)
         {
-            var tex = new Texture2D(Width, Height, TextureFormat.DXT1, false);
+            var tex = MakeTexture(createUninitialized);
             try
             {
                 IntPtr first = RawPtr(tex);
@@ -92,10 +102,11 @@ namespace Bluecadet.Hap.Tests
             }
         }
 
-        [Test]
-        public void GetRawTextureData_Length_MatchesCompressedSize()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void GetRawTextureData_Length_MatchesCompressedSize(bool createUninitialized)
         {
-            var tex = new Texture2D(Width, Height, TextureFormat.DXT1, false);
+            var tex = MakeTexture(createUninitialized);
             try
             {
                 Assert.That(tex.GetRawTextureData<byte>().Length, Is.EqualTo(Dxt1Size));
@@ -106,13 +117,14 @@ namespace Bluecadet.Hap.Tests
             }
         }
 
-        [Test]
-        public void WritesThroughCachedPointer_AreVisibleAfterApply()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void WritesThroughCachedPointer_AreVisibleAfterApply(bool createUninitialized)
         {
             Assume.That(SystemInfo.graphicsDeviceType, Is.Not.EqualTo(UnityEngine.Rendering.GraphicsDeviceType.Null),
                 "needs a graphics device");
 
-            var tex = new Texture2D(Width, Height, TextureFormat.DXT1, false);
+            var tex = MakeTexture(createUninitialized);
             try
             {
                 IntPtr cached = RawPtr(tex);
@@ -136,13 +148,14 @@ namespace Bluecadet.Hap.Tests
             }
         }
 
-        [Test]
-        public void WritesFromBackgroundThread_AreVisibleAfterApply()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void WritesFromBackgroundThread_AreVisibleAfterApply(bool createUninitialized)
         {
             Assume.That(SystemInfo.graphicsDeviceType, Is.Not.EqualTo(UnityEngine.Rendering.GraphicsDeviceType.Null),
                 "needs a graphics device");
 
-            var tex = new Texture2D(Width, Height, TextureFormat.DXT1, false);
+            var tex = MakeTexture(createUninitialized);
             try
             {
                 IntPtr cached = RawPtr(tex);

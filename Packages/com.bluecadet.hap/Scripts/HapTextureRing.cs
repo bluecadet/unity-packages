@@ -87,9 +87,11 @@ namespace Bluecadet.Hap
                         Debug.LogWarning($"[HapPlayer] Unknown texture format {(int)format}, " +
                                          $"decoding texture {t} as {unityFormat}");
 
-                    var tex = _variant.IsLinear(t)
-                        ? new Texture2D(width, height, unityFormat, false, true)
-                        : new Texture2D(width, height, unityFormat, false);
+                    // The decoder overwrites every texel of every slot before any read ever
+                    // happens, so the zero-fill (and its accompanying GPU upload of that zeroed
+                    // data) a default Texture2D performs is wasted work on the open path.
+                    var tex = new Texture2D(width, height, unityFormat, mipChain: false,
+                        linear: _variant.IsLinear(t), createUninitialized: true);
                     tex.filterMode = FilterMode.Bilinear;
                     tex.wrapMode = TextureWrapMode.Clamp;
 
