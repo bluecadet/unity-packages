@@ -19,10 +19,12 @@ namespace Bluecadet.Hap.Tests
         [TearDown]
         public void TearDown()
         {
-            _session?.Close();
+            if (_session != null)
+            {
+                _session.BeginTeardown();
+                _session.WaitForTeardown(HapTestFixtures.TimeoutMs);
+            }
             _pipeline?.Dispose();
-            _session?.Join();
-            _session?.Dispose();
             _pipeline = null;
             _session = null;
         }
@@ -38,8 +40,8 @@ namespace Bluecadet.Hap.Tests
         {
             HapTestFixtures.Require(path);
 
-            _session = new HapFileSession();
-            _session.Open(path);
+            _session = new HapFileSession(path);
+            _session.Open();
 
             SessionOpenStatus status = SessionOpenStatus.NotReady;
             HapTestFixtures.PollUntil(() => (status = _session.TryConsumeOpenResult()) != SessionOpenStatus.NotReady,
@@ -114,14 +116,17 @@ namespace Bluecadet.Hap.Tests
         }
 
         [Test]
-        public void Close_StopsTheDecodeThreadBeforeTheTexturesGoAway()
+        public void Teardown_ParksTheDecodeThreadBeforeTheTexturesGoAway()
         {
             StartPlayback(HapTestFixtures.Hap1);
             Assert.That(PresentWithinTimeout(), Is.True);
 
-            // Close() must confirm the decode thread has stopped, since the caller destroys
-            // the textures it decodes into as soon as this returns.
-            Assert.That(_session.Close(), Is.True, "the decode thread did not stop in time");
+            // The teardown must report the decode thread parked before the caller destroys the
+            // textures it decodes into.
+            _session.BeginTeardown();
+            Assert.That(_session.WaitForTeardown(HapTestFixtures.TimeoutMs), Is.True,
+                "the decode thread did not stop in time");
+            Assert.That(_session.IsTornDown, Is.True);
             Assert.DoesNotThrow(() => _pipeline.Dispose());
         }
     }

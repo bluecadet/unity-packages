@@ -8,23 +8,23 @@ namespace Bluecadet.Hap
     internal enum SessionOpenStatus { NotReady, Opened, Failed }
 
     /// <summary>
-    /// Owns the native handle for one open Hap file and the background threads around it:
-    /// an open thread, a decode thread that fills the caller's texture ring, and a close
-    /// thread that releases the handle once decoding has stopped.
+    /// One open file: the native handle, the background thread that opens it, and the decode
+    /// thread that fills the caller's texture ring. A session covers a single file from open
+    /// to teardown and is never reused — the player creates a new one per open.
+    ///
+    /// Teardown does not block the caller: <see cref="BeginTeardown"/> returns immediately and
+    /// a background thread joins the open and decode threads and closes the handle. The owner
+    /// polls <see cref="IsTornDown"/>, and only then destroys the textures the decode thread
+    /// writes into.
     /// </summary>
-    internal sealed class HapFileSession : IDisposable
+    internal sealed class HapFileSession
     {
-        /// <summary>
-        /// How long <see cref="Close"/> waits on the main thread for the decode thread to
-        /// stop. It only ever has to finish the frame in flight; the timeout exists so a
-        /// wedged native call cannot hang the editor.
-        /// </summary>
-        const int DecodeExitTimeoutMs = 2000;
-
         /// <summary>Give up on a file after this many consecutive decode failures.</summary>
         const int MaxConsecutiveDecodeErrors = 10;
 
-        // ── Metadata (valid while IsOpen) ────────────────────────────────────
+        // ── Metadata (valid once opened) ─────────────────────────────────────
+
+        public string FilePath { get; }
 
         public int FrameCount => _open?.FrameCount ?? 0;
         public float FrameRate => _open?.FrameRate ?? 0f;
@@ -34,10 +34,10 @@ namespace Bluecadet.Hap
         /// <summary>Format and size of each texture a frame carries (1, or 2 for Hap Q Alpha).</summary>
         public HapTextureInfo[] Textures => _open?.Textures;
 
-        public float Duration => FrameCount > 0 && FrameRate > 0f ? FrameCount / FrameRate : 0f;
+        /// <summary>Why the open failed, or <see cref="HapError.Ok"/>.</summary>
+        public HapError Error => _open?.Error ?? HapError.Ok;
 
-        public bool IsOpen    => _handle != IntPtr.Zero;
-        public bool IsOpening => _openThread != null;
+        public float Duration => FrameCount > 0 && FrameRate > 0f ? FrameCount / FrameRate : 0f;
 
         // ── Native handle ────────────────────────────────────────────────────
 
@@ -45,24 +45,18 @@ namespace Bluecadet.Hap
         /// The open thread's result once it has been consumed, which every metadata property
         /// reads through. Kept whole rather than copied out field by field.
         /// </summary>
-        OpenResult _open;
+        NativeOpenResult _open;
 
         /// <summary>
         /// The live native handle. Separate from <see cref="_open"/> because teardown zeroes it
         /// while the metadata stays readable.
         /// </summary>
         IntPtr _handle;
-        string _filePath;
 
         // ── Open thread state ────────────────────────────────────────────────
 
         Thread _openThread;
-        volatile bool _openCancelled;
-        volatile OpenResult _pendingOpenResult;
-
-        // ── Close thread ─────────────────────────────────────────────────────
-
-        Thread _closeThread;
+        volatile NativeOpenResult _pendingOpenResult;
 
         // ── Decode thread state ──────────────────────────────────────────────
 
@@ -73,41 +67,33 @@ namespace Bluecadet.Hap
         volatile int _decodeDirection = 1;
         HapTextureRing _ring;
         readonly object _decodeLock = new();
-        readonly ManualResetEventSlim _decodeExited = new(true);
+
+        // ── Teardown state ───────────────────────────────────────────────────
+
+        bool _teardownStarted;
+
+        /// <summary>
+        /// Set by the teardown thread as its last act. A plain flag rather than an event:
+        /// nothing here is disposable, so the owner can drop the session the moment it reads
+        /// true without ever racing the signal.
+        /// </summary>
+        volatile bool _tornDown;
+
+        /// <summary>True once the decode thread has parked and the native handle is closed.</summary>
+        public bool IsTornDown => _tornDown;
 
         // ── Profiler markers ─────────────────────────────────────────────────
 
         static readonly ProfilerMarker s_DecodeMarker = new("HapPlayer.DecodeFrame");
 
+        public HapFileSession(string filePath) => FilePath = filePath;
+
         // ── Open ─────────────────────────────────────────────────────────────
 
-        public void Open(string resolvedPath)
+        /// <summary>Start opening the file on a background thread. Call once, from the main thread.</summary>
+        public void Open()
         {
-            _filePath = resolvedPath;
-
-            // If an open is already in progress (rapid enable/disable/enable, or Open(path) called
-            // mid-open), wait for it to finish and discard any result before starting a fresh open.
-            if (_openThread != null)
-            {
-                _openThread.Join();
-                _openThread = null;
-                var stale = _pendingOpenResult;
-                _pendingOpenResult = null;
-                if (stale != null && stale.Handle != IntPtr.Zero)
-                    HapNative.hap_close(stale.Handle);
-            }
-
-            if (IsOpen) return;
-
-            // Ensure the previous deferred close has fully finished before reusing _decodeExited
-            // and starting a new decode thread.
-            _closeThread?.Join();
-            _closeThread = null;
-
-            _openCancelled = false;
-            _pendingOpenResult = null;
-
-            _openThread = new Thread(() => OpenBackground(resolvedPath))
+            _openThread = new Thread(OpenBackground)
             {
                 IsBackground = true,
                 Name = "HapOpen"
@@ -115,17 +101,18 @@ namespace Bluecadet.Hap
             _openThread.Start();
         }
 
-        public void CancelOpen() => _openCancelled = true;
-
-        void OpenBackground(string resolved)
+        void OpenBackground()
         {
-            HapError error = HapNative.Open(resolved, out IntPtr handle);
+            HapError error = HapNative.Open(FilePath, out IntPtr handle);
+
+            // The plugin pairs Ok with a live handle; anything else is a bug in it, not a state
+            // to paper over with an invented error code.
+            Debug.Assert(error != HapError.Ok || handle != IntPtr.Zero,
+                         "[HapPlayer] hap_open reported success without a handle");
 
             if (error != HapError.Ok || handle == IntPtr.Zero)
             {
-                if (!_openCancelled)
-                    Debug.LogError($"[HapPlayer] Failed to open '{resolved}': {error}");
-                _pendingOpenResult = OpenResult.Failed(error == HapError.Ok ? HapError.FileRead : error);
+                _pendingOpenResult = NativeOpenResult.Failed(error);
                 return;
             }
 
@@ -135,11 +122,8 @@ namespace Bluecadet.Hap
 
             if (frameRate <= 0f || frameCount <= 0 || textureCount <= 0)
             {
-                if (!_openCancelled)
-                    Debug.LogError($"[HapPlayer] Invalid video ({frameCount} frames, {frameRate} fps, " +
-                                   $"{textureCount} textures) in '{resolved}'");
                 HapNative.hap_close(handle);
-                _pendingOpenResult = OpenResult.Failed(HapError.CorruptTrack);
+                _pendingOpenResult = NativeOpenResult.Failed(HapError.CorruptTrack);
                 return;
             }
 
@@ -153,7 +137,7 @@ namespace Bluecadet.Hap
                     // something else entirely, so refuse the file instead.
                     Debug.LogWarning($"[HapPlayer] Texture {t} of '{FilePath}' uses unknown format {nativeFormat}");
                     HapNative.hap_close(handle);
-                    _pendingOpenResult = OpenResult.Failed(HapError.UnsupportedVariant);
+                    _pendingOpenResult = NativeOpenResult.Failed(HapError.UnsupportedVariant);
                     return;
                 }
 
@@ -161,7 +145,7 @@ namespace Bluecadet.Hap
                     format, HapNative.hap_get_texture_buffer_size(handle, t));
             }
 
-            _pendingOpenResult = new OpenResult(
+            _pendingOpenResult = new NativeOpenResult(
                 handle,
                 frameCount,
                 frameRate,
@@ -171,48 +155,44 @@ namespace Bluecadet.Hap
             );
         }
 
-        // ── Poll for result (main thread) ────────────────────────────────────
-
         /// <summary>
-        /// Call from the main thread in Update(). Returns Opened if a successful open result
-        /// is ready (metadata properties are populated); Failed if the open failed or was
-        /// cancelled; NotReady if the open thread is still running or no open was started.
-        /// On Opened, the caller builds the texture ring and calls
-        /// <see cref="StartDecoding"/>.
+        /// Poll the open from the main thread. Returns Opened once the metadata properties are
+        /// populated and the caller can build a texture ring, Failed with <see cref="Error"/>
+        /// set, or NotReady while the open thread is still working.
         /// </summary>
         public SessionOpenStatus TryConsumeOpenResult()
         {
+            if (_teardownStarted) return SessionOpenStatus.Failed;
+
             var result = _pendingOpenResult;
             if (result == null) return SessionOpenStatus.NotReady;
 
             _pendingOpenResult = null;
-            _openThread = null;
 
-            if (_openCancelled || !result.Success)
+            _open = result;
+
+            if (!result.Success)
             {
                 if (result.Handle != IntPtr.Zero)
                     HapNative.hap_close(result.Handle);
                 return SessionOpenStatus.Failed;
             }
 
-            _open   = result;
             _handle = result.Handle;
-
             return SessionOpenStatus.Opened;
         }
 
         // ── Decode thread lifecycle ──────────────────────────────────────────
 
         /// <summary>
-        /// Start the decode thread and queue the first frame. Call from the main thread
-        /// immediately after TryConsumeOpenResult() returns Opened and the texture ring exists.
+        /// Start the decode thread and queue the first frame. Call from the main thread once
+        /// <see cref="TryConsumeOpenResult"/> has returned Opened and the texture ring exists.
         /// </summary>
         public void StartDecoding(HapTextureRing ring, int firstFrame)
         {
             _ring          = ring;
             _handleValid   = true;
             _decodeRunning = true;
-            _decodeExited.Reset();
             _decodeThread = new Thread(DecodeLoop)
             {
                 IsBackground = true,
@@ -231,9 +211,6 @@ namespace Bluecadet.Hap
                 _decodeThread  = null;
                 _decodeRunning = false;
                 _handleValid   = false;
-                _decodeExited.Set();
-                HapNative.hap_close(_handle);
-                _handle = IntPtr.Zero;
                 return;
             }
 
@@ -259,160 +236,148 @@ namespace Bluecadet.Hap
             HapTextureRing ring = _ring;
             int textureCount = ring != null ? ring.TextureCount : 0;
 
-            try
+            var scheduler = new DecodeScheduler(frameCount);
+            int consecutiveErrors = 0;
+
+            while (_decodeRunning)
             {
-                var scheduler = new DecodeScheduler(frameCount);
-                int consecutiveErrors = 0;
+                int target;
+                bool isPrefetch;
+                int dir;
 
-                while (_decodeRunning)
+                lock (_decodeLock)
                 {
-                    int target;
-                    bool isPrefetch;
-                    int dir;
+                    dir = _decodeDirection;
+                    var (t, pf, block) = scheduler.Next(_decodeTargetFrame, dir);
 
-                    lock (_decodeLock)
+                    if (block)
                     {
+                        // Block until the main thread requests a new frame or signals exit.
+                        // 100ms safety timeout guards against Pulse being missed during a
+                        // teardown race.
+                        while (_decodeRunning && _decodeTargetFrame == scheduler.LastExplicit)
+                            Monitor.Wait(_decodeLock, 100);
+
+                        if (!_decodeRunning) break;
                         dir = _decodeDirection;
-                        var (t, pf, block) = scheduler.Next(_decodeTargetFrame, dir);
-
-                        if (block)
-                        {
-                            // Block until the main thread requests a new frame or signals exit.
-                            // 100ms safety timeout guards against Pulse being missed during a Close() race.
-                            while (_decodeRunning && _decodeTargetFrame == scheduler.LastExplicit)
-                                Monitor.Wait(_decodeLock, 100);
-
-                            if (!_decodeRunning) break;
-                            dir = _decodeDirection;
-                            (t, pf, _) = scheduler.Next(_decodeTargetFrame, dir);
-                        }
-
-                        target     = t;
-                        isPrefetch = pf;
+                        (t, pf, _) = scheduler.Next(_decodeTargetFrame, dir);
                     }
 
-                    if (target == -1) continue;
-                    if (ring == null) break;
-                    if (!_handleValid) break;
+                    target     = t;
+                    isPrefetch = pf;
+                }
 
-                    int slot = ring.BeginWrite();
-                    HapError result = HapError.Ok;
+                if (target == -1) continue;
+                if (ring == null) break;
+                if (!_handleValid) break;
 
-                    // Decode a frame's textures back to back: the second call reuses the
-                    // sample the first one demuxed.
-                    using (s_DecodeMarker.Auto())
-                    {
-                        for (int t = 0; t < textureCount; t++)
-                        {
-                            result = HapNative.DecodeTexture(handle, target, t,
-                                                             ring.GetWritePtr(slot, t),
-                                                             ring.GetBufferSize(t));
-                            if (result != HapError.Ok) break;
-                        }
-                    }
+                int slot = ring.BeginWrite();
+                HapError result = HapError.Ok;
 
-                    if (result != HapError.Ok)
+                // Decode a frame's textures back to back: the second call reuses the
+                // sample the first one demuxed.
+                using (s_DecodeMarker.Auto())
+                {
+                    for (int t = 0; t < textureCount; t++)
                     {
-                        consecutiveErrors++;
-                        Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}: {result} " +
-                                         $"({consecutiveErrors} consecutive)");
-                        if (consecutiveErrors >= MaxConsecutiveDecodeErrors)
-                        {
-                            Debug.LogError($"[HapPlayer] Decode loop aborting after {consecutiveErrors} " +
-                                           $"consecutive errors on '{_filePath}'");
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        consecutiveErrors = 0;
-                        ring.CommitWrite(slot, target);
-                        scheduler.OnDecoded(target, isPrefetch, dir);
+                        result = HapNative.DecodeTexture(handle, target, t,
+                                                         ring.GetWritePtr(slot, t),
+                                                         ring.GetBufferSize(t));
+                        if (result != HapError.Ok) break;
                     }
                 }
-            }
-            finally
-            {
-                _decodeExited.Set();
+
+                if (result != HapError.Ok)
+                {
+                    consecutiveErrors++;
+                    Debug.LogWarning($"[HapPlayer] Failed to decode frame {target}: {result} " +
+                                     $"({consecutiveErrors} consecutive)");
+                    if (consecutiveErrors >= MaxConsecutiveDecodeErrors)
+                    {
+                        Debug.LogError($"[HapPlayer] Decode loop aborting after {consecutiveErrors} " +
+                                       $"consecutive errors on '{FilePath}'");
+                        break;
+                    }
+                }
+                else
+                {
+                    consecutiveErrors = 0;
+                    ring.CommitWrite(slot, target);
+                    scheduler.OnDecoded(target, isPrefetch, dir);
+                }
             }
         }
 
-        // ── Close ────────────────────────────────────────────────────────────
+        // ── Teardown ─────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Stop decoding and release the native handle. The handle is closed on a background
-        /// thread, but the decode thread is waited on here: the caller destroys the texture
-        /// ring the decode thread writes into as soon as this returns.
-        ///
-        /// Returns false if the decode thread did not stop within
-        /// <see cref="DecodeExitTimeoutMs"/>, meaning the ring must NOT be destroyed.
+        /// Stop decoding and release the file without blocking. A background thread joins the
+        /// open and decode threads and closes the native handle; watch <see cref="IsTornDown"/>
+        /// (or <see cref="WaitForTeardown"/>) before destroying the textures being decoded
+        /// into. Repeat calls are ignored. Main thread only.
         /// </summary>
-        public bool Close()
+        public void BeginTeardown()
         {
-            if (!IsOpen && _decodeThread == null) return true;
+            if (_teardownStarted) return;
+            _teardownStarted = true;
 
             _decodeRunning = false;
             lock (_decodeLock)
                 Monitor.Pulse(_decodeLock);
 
-            bool decodeStopped = _decodeThread == null || _decodeExited.Wait(DecodeExitTimeoutMs);
-            if (!decodeStopped)
-                Debug.LogError($"[HapPlayer] Decode thread did not stop within {DecodeExitTimeoutMs}ms " +
-                               $"for '{_filePath}'");
-
-            var handle       = _handle;
+            var openThread   = _openThread;
             var decodeThread = _decodeThread;
+            var handle       = _handle;
 
-            _ring         = null;
+            _openThread   = null;
+            _decodeThread = null;
             _handle       = IntPtr.Zero;
             _handleValid  = false;
-            _decodeThread = null;
-            FrameCount    = 0;
-            FrameRate     = 0f;
-            Width         = 0;
-            Height        = 0;
-            Textures      = null;
+            _ring         = null;
 
-            _closeThread = new Thread(() =>
+            var teardownThread = new Thread(() =>
             {
-                if (decodeThread != null)
-                    _decodeExited.Wait();
+                // The open thread may still be memory-mapping the file, and it hands back a
+                // handle nobody consumed — that one is ours to close too.
+                openThread?.Join();
+                var unconsumed = _pendingOpenResult;
+                _pendingOpenResult = null;
+                if (unconsumed != null && unconsumed.Handle != IntPtr.Zero && unconsumed.Handle != handle)
+                    HapNative.hap_close(unconsumed.Handle);
 
-                // Mark invalid before hap_close so a lingering decode thread (extremely
-                // unlikely given the Wait above) can detect the handle is gone.
-                _handleValid = false;
+                // The decode thread only has to finish the frame in flight. Joining it is what
+                // makes closing the handle safe: it can no longer be inside a decode call, and
+                // it can no longer be writing into the ring's textures.
+                decodeThread?.Join();
+
                 if (handle != IntPtr.Zero)
                     HapNative.hap_close(handle);
+
+                _tornDown = true;
             })
             {
                 IsBackground = true,
-                Name = "HapClose"
+                Name = "HapTeardown"
             };
-            _closeThread.Start();
-
-            return decodeStopped;
+            teardownThread.Start();
         }
-
-        // ── Teardown (called from OnDestroy) ─────────────────────────────────
 
         /// <summary>
-        /// Block until the open thread and close thread have both exited. Drains any
-        /// unconsumed open result to prevent native handle leaks. Call before Dispose().
+        /// Block for up to <paramref name="timeoutMs"/> waiting for the teardown to finish.
+        /// Only for the destroy path, where nothing can await it; everywhere else, poll
+        /// <see cref="IsTornDown"/>.
         /// </summary>
-        public void Join()
+        public bool WaitForTeardown(int timeoutMs)
         {
-            if (_openThread != null)
-            {
-                _openThread.Join();
-                _openThread = null;
-                var leftover = _pendingOpenResult;
-                _pendingOpenResult = null;
-                if (leftover != null && leftover.Handle != IntPtr.Zero)
-                    HapNative.hap_close(leftover.Handle);
-            }
-            _closeThread?.Join();
-        }
+            if (_tornDown) return true;
 
-        public void Dispose() => _decodeExited.Dispose();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < timeoutMs)
+            {
+                if (_tornDown) return true;
+                Thread.Sleep(1);
+            }
+            return _tornDown;
+        }
     }
 }

@@ -1,4 +1,3 @@
-using System.IO;
 using UnityEngine;
 using Unity.Profiling;
 
@@ -29,13 +28,29 @@ namespace Bluecadet.Hap
     }
 
     /// <summary>
-    /// MonoBehaviour that plays HAP-encoded video files.
+    /// MonoBehaviour that plays Hap-encoded video files.
     ///
-    /// Delegates file I/O, native handle lifetime, and background thread coordination to
-    /// <see cref="HapFileSession"/>. Owns the output GPU pipeline and playback clock.
+    /// Opening and closing are asynchronous and awaitable: <see cref="OpenAsync"/> completes on
+    /// the main thread with a typed <see cref="OpenResult"/>, and <see cref="CloseAsync"/>
+    /// completes once the file is fully released. The fire-and-forget <see cref="Open(string)"/>
+    /// / <see cref="Close()"/> pair and the <see cref="Opened"/> event sit on top of the same
+    /// path for inspector-driven use.
+    ///
+    /// The last call wins: opening while another open or a file is already live supersedes it,
+    /// and the superseded caller's await completes with <see cref="HapOpenStatus.Superseded"/>.
+    /// Opening while a close is still finishing queues behind that teardown.
     /// </summary>
     public class HapPlayer : MonoBehaviour
     {
+        /// <summary>
+        /// How long <see cref="OnDestroy"/> waits for the decode thread to park. Nothing can
+        /// await there and Unity is about to reclaim the textures the decode thread writes
+        /// into, so this is the one place a short block is worth it; the thread only has to
+        /// finish the frame in flight. If it is slower, the teardown is handed to
+        /// <see cref="HapMainLoop"/> and finishes there instead of blocking any longer.
+        /// </summary>
+        const int DestroyTeardownWaitMs = 250;
+
         // ── Serialized fields ────────────────────────────────────────────────
 
         [SerializeField] string filePath;
@@ -47,10 +62,27 @@ namespace Bluecadet.Hap
         [SerializeField] float playbackSpeed = 1f;
         [SerializeField] RenderTexture targetRenderTexture;
 
-        // ── Session + pipeline ───────────────────────────────────────────────
+        // ── Open/close state ─────────────────────────────────────────────────
 
-        HapFileSession _session;
-        HapOutputPipeline _outputPipeline;
+        HapLifecycle _lifecycle;
+
+        /// <summary>
+        /// The open/close state machine, built on first touch: edit mode never runs Awake, and
+        /// the async API has to work there too.
+        /// </summary>
+        HapLifecycle Lifecycle
+        {
+            get
+            {
+                if (_lifecycle != null) return _lifecycle;
+
+                _lifecycle = new HapLifecycle();
+                _lifecycle.PathAdopted += path => filePath = path;
+                _lifecycle.Closing += StopPlayback;
+                _lifecycle.Opened += HandleOpened;
+                return _lifecycle;
+            }
+        }
 
         // ── Playback state ───────────────────────────────────────────────────
 
@@ -76,7 +108,7 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Raised once on the main thread when the video finishes opening and is ready to play.
-        /// Not raised if opening fails or is cancelled.
+        /// Not raised if opening fails, is superseded, or is cancelled.
         /// </summary>
         public event System.Action Opened;
 
@@ -89,28 +121,27 @@ namespace Bluecadet.Hap
         // ── Public properties ────────────────────────────────────────────────
 
         /// <summary>
-        /// The current video frame as a correctly-oriented RGBA RenderTexture.
-        /// Falls back to the raw DXT Texture2D if the output shader failed to load.
+        /// The current video frame as a correctly-oriented RGBA RenderTexture, or null while
+        /// no file is open.
         /// </summary>
-        public Texture Texture
-        {
-            get
-            {
-                if (_outputPipeline == null) return null;
-                Texture t = _outputPipeline.DisplayTexture;
-                return t != null ? t : _outputPipeline.RawTexture;
-            }
-        }
+        public Texture Texture => Lifecycle.Pipeline?.DisplayTexture;
 
         public bool IsPlaying  => _playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon;
-        public bool IsOpen     => _session?.IsOpen ?? false;
-        public bool IsOpening  => _session?.IsOpening ?? false;
 
-        public int FrameCount  => _session?.FrameCount ?? 0;
-        public float Duration  => _session?.Duration ?? 0f;
-        public float FrameRate => _session?.FrameRate ?? 0f;
-        public int Width       => _session?.Width ?? 0;
-        public int Height      => _session?.Height ?? 0;
+        /// <summary>True once a file is open and decoding.</summary>
+        public bool IsOpen     => Lifecycle.IsOpen;
+
+        /// <summary>True while an open is in flight, including one queued behind a close.</summary>
+        public bool IsOpening  => Lifecycle.IsOpening;
+
+        /// <summary>True while a file is being released.</summary>
+        public bool IsClosing  => Lifecycle.IsClosing;
+
+        public int FrameCount  => Lifecycle.Session?.FrameCount ?? 0;
+        public float Duration  => Lifecycle.Session?.Duration ?? 0f;
+        public float FrameRate => Lifecycle.Session?.FrameRate ?? 0f;
+        public int Width       => Lifecycle.Session?.Width ?? 0;
+        public int Height      => Lifecycle.Session?.Height ?? 0;
         public string FilePath => filePath;
 
         /// <summary>
@@ -204,107 +235,95 @@ namespace Bluecadet.Hap
 
         void OnEnable()
         {
-            _session ??= new HapFileSession();
-            _pendingPlay = playOnEnable;
-            if (!string.IsNullOrEmpty(filePath))
-                _session.Open(ResolvePath(filePath));
+            // Nothing to open, so stay out of the shared main loop rather than have it spin up
+            // for a player with no work in flight.
+            if (string.IsNullOrEmpty(filePath)) return;
+
+            // Re-enabling after a disable reopens the file. If that disable's teardown is still
+            // finishing, the open simply queues behind it.
+            Open(filePath);
+
+            // After the open, not before: opening supersedes the previous file and stops its
+            // playback, pending or otherwise. Play() queues itself behind an open in flight.
+            if (playOnEnable) Play();
         }
 
         void OnDisable()
         {
-            _session?.CancelOpen();
-            CloseInternal();
+            // Disabling stops ticking this component, but the shared main loop keeps the
+            // teardown moving so the textures are still released promptly.
+            Lifecycle.Close(HapOpenStatus.Cancelled);
+            SyncMainLoop();
         }
 
-        void OnDestroy()
-        {
-            _session?.CancelOpen();
-            CloseInternal();
-            _session?.Join();
-            _session?.Dispose();
-            _session = null;
-        }
+        void OnDestroy() => AbandonAfterDestroy(DestroyTeardownWaitMs);
 
         void Update()
         {
-            if (_session == null) return;
+            TickLifecycle();
 
-            switch (_session.TryConsumeOpenResult())
-            {
-                case SessionOpenStatus.Opened:
-                    CompleteOpen();
-                    break;
-                case SessionOpenStatus.Failed:
-                    _pendingPlay = false;
-                    break;
-            }
+            if (!Lifecycle.IsOpen) return;
 
-            if (!IsOpen) return;
+            float deltaTime = timeSource == HapTimeSource.UnscaledGameTime
+                ? UnityEngine.Time.unscaledDeltaTime
+                : UnityEngine.Time.deltaTime;
+
             using (s_UpdateMarker.Auto())
-                UpdatePlayback();
+                TickPlayback(deltaTime);
         }
 
-        // ── File open/close ──────────────────────────────────────────────────
+        // ── Public open/close ────────────────────────────────────────────────
 
-        static string ResolvePath(string path)
+        /// <summary>
+        /// Open a video file, superseding whatever this player was doing. The returned
+        /// awaitable completes on the main thread with <see cref="HapOpenStatus.Success"/> once
+        /// the file is decoding, or with the reason it did not open — including
+        /// <see cref="HapOpenStatus.Superseded"/> if another Open/Close call replaced this one
+        /// and <see cref="HapOpenStatus.Cancelled"/> if the component was torn down first.
+        ///
+        /// Relative paths resolve inside StreamingAssets. Main thread only.
+        /// </summary>
+        public Awaitable<OpenResult> OpenAsync(string path)
         {
-            if (string.IsNullOrEmpty(path)) return path;
-            if (Path.IsPathRooted(path)) return path;
-            return Path.Combine(Application.streamingAssetsPath, path);
+            var awaitable = Lifecycle.OpenAsync(path);
+            SyncMainLoop();
+            return awaitable;
         }
 
-        void CompleteOpen()
+        /// <summary>
+        /// Open a video file without waiting for the result — the <see cref="Opened"/> event
+        /// reports success, and failures are logged. Main thread only.
+        /// </summary>
+        public void Open(string path)
         {
-            // The GPU can be up to maxQueuedFrames behind the main thread, so a texture must
-            // not be decoded into again until that many later frames have been uploaded.
-            int retireDepth = Mathf.Max(1, QualitySettings.maxQueuedFrames);
-            _outputPipeline = new HapOutputPipeline(_session.Width, _session.Height, _session.Textures, retireDepth);
-
-            // The ring reports its textures too small for the decoder's output — every decode
-            // would fail, so stop here rather than spinning on errors. It has already logged why.
-            if (!_outputPipeline.Ring.IsValid)
-            {
-                _pendingPlay = false;
-                CloseInternal();
-                return;
-            }
-
-            _playbackClock.Time = 0f;
-            _openedFrame = UnityEngine.Time.frameCount;
-            _session.StartDecoding(_outputPipeline.Ring, 0);
-
-            Opened?.Invoke();
-            if (_pendingPlay)
-            {
-                _pendingPlay = false;
-                Play();
-            }
+            Lifecycle.Open(path);
+            SyncMainLoop();
         }
 
-        void CloseInternal()
+        /// <summary>
+        /// Close the current file. The returned awaitable completes on the main thread once the
+        /// decode thread has parked, the file is closed and its textures are released — or
+        /// immediately if nothing is open. Main thread only.
+        /// </summary>
+        public Awaitable CloseAsync()
         {
-            _playing = false;
+            var awaitable = Lifecycle.CloseAsync();
+            SyncMainLoop();
+            return awaitable;
+        }
 
-            // Stop decoding before destroying the ring: the decode thread writes straight into
-            // the ring's textures, so tearing them down under it would be a use-after-free.
-            bool decodeStopped = _session?.Close() ?? true;
-
-            if (_outputPipeline != null)
-            {
-                if (decodeStopped)
-                    _outputPipeline.Dispose();
-                else
-                    Debug.LogError("[HapPlayer] Leaking video textures: the decode thread is still running " +
-                                   "and destroying them now would crash");
-                _outputPipeline = null;
-            }
+        /// <summary>Close the current file without waiting for the teardown. Main thread only.</summary>
+        public void Close()
+        {
+            Lifecycle.Close(HapOpenStatus.Superseded);
+            SyncMainLoop();
         }
 
         // ── Public playback control ──────────────────────────────────────────
 
         public void Play()
         {
-            if (_session?.IsOpening == true)
+            if (IsOpening)
             {
                 _pendingPlay = true;
                 return;
@@ -320,42 +339,96 @@ namespace Bluecadet.Hap
             _playing = true;
         }
 
-        public void Pause()
-        {
-            _pendingPlay = false;
-            _playing = false;
-        }
+        public void Pause() => StopPlayback();
 
         /// <summary>Stop playback and reset to frame 0, regardless of playback direction.</summary>
         public void Stop()
         {
-            _pendingPlay = false;
-            _playing = false;
+            StopPlayback();
             _playbackClock.Time = 0f;
             SeekDecodeToClock();
         }
 
-        /// <summary>Close current file (if any) and open a new one.</summary>
-        public void Open(string path)
+        // ── Lifecycle plumbing ───────────────────────────────────────────────
+
+        /// <summary>
+        /// Advance the open/close state machine. Called from Update and from
+        /// <see cref="HapMainLoop"/>, which keeps disabled players moving too.
+        /// </summary>
+        internal void TickLifecycle()
         {
-            _session ??= new HapFileSession();
-            _session.CancelOpen();
-            CloseInternal();
-            filePath = path;
-            _session.Open(ResolvePath(filePath));
+            Lifecycle.Tick();
+            SyncMainLoop();
+        }
+
+        /// <summary>
+        /// Release everything for a player that is going away, whether or not Unity delivered
+        /// <see cref="OnDestroy"/> (outside play mode it does not).
+        /// </summary>
+        /// <param name="waitForReleaseMs">
+        /// How long to give the background teardown before handing it to <see cref="HapMainLoop"/>.
+        /// Only OnDestroy passes anything but zero, and only because Unity is about to reclaim
+        /// the textures the decode thread writes into and nothing there can await.
+        /// </param>
+        internal void AbandonAfterDestroy(int waitForReleaseMs = 0)
+        {
+            var orphan = Lifecycle.Abandon(waitForReleaseMs);
+            if (orphan != null)
+                HapMainLoop.Orphan(orphan);
+
+            HapMainLoop.Unregister(this);
+        }
+
+        /// <summary>
+        /// Keep the shared main loop ticking this player exactly while it has an open or close
+        /// in flight — including while it is disabled, when its own Update is not running.
+        /// </summary>
+        void SyncMainLoop()
+        {
+            // A call from the wrong thread is refused rather than acted on, and the loop's own
+            // bookkeeping is no safer to touch from there than anything else.
+            if (!HapThread.IsMain) return;
+
+            if (Lifecycle.HasPendingWork)
+                HapMainLoop.Register(this);
+            else
+                HapMainLoop.Unregister(this);
+        }
+
+        /// <summary>Playback cannot outlive the file it was running on.</summary>
+        void StopPlayback()
+        {
+            _pendingPlay = false;
+            _playing = false;
+        }
+
+        /// <summary>The file is open: start it from the top and tell everyone waiting on it.</summary>
+        void HandleOpened()
+        {
+            _playbackClock.Time = 0f;
+            _openedFrame = UnityEngine.Time.frameCount;
+
+            Opened?.Invoke();
+
+            // A handler is free to close this player again, which clears the pending play.
+            if (_pendingPlay)
+            {
+                _pendingPlay = false;
+                Play();
+            }
         }
 
         // ── Playback update ──────────────────────────────────────────────────
 
-        void UpdatePlayback()
+        /// <summary>
+        /// Advance the clock by <paramref name="deltaTime"/> seconds, upload whatever has been
+        /// decoded, and render it. Update supplies the frame's delta; tests supply their own.
+        /// </summary>
+        internal void TickPlayback(float deltaTime)
         {
             if (_playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon)
             {
-                float dt = timeSource == HapTimeSource.UnscaledGameTime
-                    ? UnityEngine.Time.unscaledDeltaTime
-                    : UnityEngine.Time.deltaTime;
-
-                var evt = _playbackClock.Advance(dt, playbackSpeed, Duration, loop);
+                var evt = _playbackClock.Advance(deltaTime, playbackSpeed, Duration, loop);
 
                 switch (evt)
                 {
@@ -382,7 +455,7 @@ namespace Bluecadet.Hap
                 RenderFrame();
 
             if (uploadedNewFrame)
-                _outputPipeline?.SwapBuffers();
+                Lifecycle.Pipeline?.SwapBuffers();
         }
 
         /// <summary>
@@ -394,16 +467,17 @@ namespace Bluecadet.Hap
             if (!IsOpen || FrameCount <= 0) return;
 
             int direction = playbackSpeed > 0f ? 1 : -1;
-            _session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), direction);
+            Lifecycle.Session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), direction);
         }
 
         bool UploadFrame()
         {
-            if (_outputPipeline == null) return false;
-            // Skip GPU uploads in the same frame that CompleteOpen() ran. D3D12 requires at least
+            var pipeline = Lifecycle.Pipeline;
+            if (pipeline == null) return false;
+            // Skip GPU uploads in the same frame that the file opened in. D3D12 requires at least
             // one command-list flush between RenderTexture.Create() and the first blit that targets it.
             if (UnityEngine.Time.frameCount == _openedFrame) return false;
-            return _outputPipeline.Present();
+            return pipeline.Present();
         }
 
         /// <summary>Put the current frame wherever <see cref="RenderMode"/> says it goes.</summary>
