@@ -39,8 +39,13 @@ namespace Bluecadet.Hap
     /// The last call wins: opening while another open or a file is already live supersedes it,
     /// and the superseded caller's await completes with <see cref="HapOpenStatus.Superseded"/>.
     /// Opening while a close is still finishing queues behind that teardown.
+    ///
+    /// A player does not drive itself: while it has a file open or a request in flight it is
+    /// registered with <see cref="HapMainLoop"/>, which advances every player's clock, decode
+    /// request, upload and render from one place. See that class for why the uploads in
+    /// particular are better off scheduled across all players than issued per component.
     /// </summary>
-    public class HapPlayer : MonoBehaviour
+    public class HapPlayer : MonoBehaviour, IHapUploadTarget
     {
         /// <summary>
         /// How long <see cref="OnDestroy"/> waits for the decode thread to park. Nothing can
@@ -91,6 +96,13 @@ namespace Bluecadet.Hap
         bool _pendingPlay;
         int _openedFrame = -1;
 
+        /// <summary>
+        /// Where this player sits in <see cref="HapMainLoop"/>'s list, or -1 when it is not
+        /// registered. The loop owns the value; it lives on the player so leaving the loop costs
+        /// a swap rather than a scan of every registered player.
+        /// </summary>
+        internal int MainLoopIndex = -1;
+
         // ── Rendering helpers ────────────────────────────────────────────────
 
         MaterialPropertyBlock _mpb;
@@ -113,7 +125,7 @@ namespace Bluecadet.Hap
 
         const float k_PlaybackSpeedEpsilon = 1e-5f;
 
-        static readonly ProfilerMarker s_UpdateMarker = new("HapPlayer.Update");
+        static readonly ProfilerMarker s_ClockMarker = new("HapPlayer.AdvanceClock");
         static readonly ProfilerMarker s_UploadMarker = new("HapPlayer.UploadFrame");
         static readonly ProfilerMarker s_RenderMarker = new("HapPlayer.Render");
 
@@ -190,6 +202,22 @@ namespace Bluecadet.Hap
 
         static int s_decodeThreadCount;
 
+        /// <summary>
+        /// How many bytes of decoded video the shared main loop is willing to hand to the GPU in
+        /// one tick, across every open <see cref="HapPlayer"/>, or 0 (the default) for no cap.
+        ///
+        /// A tick that would go over the cap does not drop a player's frame outright: the players
+        /// it defers keep showing what they already uploaded and their clocks keep running, and
+        /// each gets another chance to upload on its next turn. Worth setting once enough players
+        /// are open at once that a tick's uploads would overrun the frame budget — it trades some
+        /// dropped frames for a flat per-frame upload cost across all of them.
+        /// </summary>
+        public static long UploadBudgetBytesPerFrame
+        {
+            get => HapMainLoop.UploadBudgetBytesPerFrame;
+            set => HapMainLoop.UploadBudgetBytesPerFrame = value;
+        }
+
         public bool Loop
         {
             get => loop;
@@ -263,27 +291,14 @@ namespace Bluecadet.Hap
 
         void OnDisable()
         {
-            // Disabling stops ticking this component, but the shared main loop keeps the
-            // teardown moving so the textures are still released promptly.
+            // Closing is what takes a player out of the shared loop, and only once the file is
+            // actually released — so a disabled player's teardown still finishes promptly instead
+            // of waiting for something to enable it again.
             Lifecycle.Close(HapOpenStatus.Cancelled);
             SyncMainLoop();
         }
 
         void OnDestroy() => AbandonAfterDestroy(DestroyTeardownWaitMs);
-
-        void Update()
-        {
-            TickLifecycle();
-
-            if (!Lifecycle.IsOpen) return;
-
-            float deltaTime = timeSource == HapTimeSource.UnscaledGameTime
-                ? UnityEngine.Time.unscaledDeltaTime
-                : UnityEngine.Time.deltaTime;
-
-            using (s_UpdateMarker.Auto())
-                TickPlayback(deltaTime);
-        }
 
         // ── Public open/close ────────────────────────────────────────────────
 
@@ -365,8 +380,9 @@ namespace Bluecadet.Hap
         // ── Lifecycle plumbing ───────────────────────────────────────────────
 
         /// <summary>
-        /// Advance the open/close state machine. Called from Update and from
-        /// <see cref="HapMainLoop"/>, which keeps disabled players moving too.
+        /// Advance the open/close state machine. The first thing <see cref="HapMainLoop"/> does
+        /// for a player each tick, and the only thing it does for one that is disabled or still
+        /// releasing a file.
         /// </summary>
         internal void TickLifecycle()
         {
@@ -393,8 +409,12 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
-        /// Keep the shared main loop ticking this player exactly while it has an open or close
-        /// in flight — including while it is disabled, when its own Update is not running.
+        /// Keep this player in the shared main loop exactly while the loop has something to do
+        /// for it: play an open file, or carry an open or a close to its end — the latter
+        /// including while the component is disabled, when nothing else would finish it.
+        ///
+        /// Both calls do nothing when the player is already in the state they ask for, so a video
+        /// that just plays neither joins nor leaves the loop from one frame to the next.
         /// </summary>
         void SyncMainLoop()
         {
@@ -402,7 +422,7 @@ namespace Bluecadet.Hap
             // bookkeeping is no safer to touch from there than anything else.
             if (!HapThread.IsMain) return;
 
-            if (Lifecycle.HasPendingWork)
+            if (Lifecycle.IsOpen || Lifecycle.HasPendingWork)
                 HapMainLoop.Register(this);
             else
                 HapMainLoop.Unregister(this);
@@ -431,45 +451,107 @@ namespace Bluecadet.Hap
             }
         }
 
-        // ── Playback update ──────────────────────────────────────────────────
+        // ── Playback tick, driven by HapMainLoop ─────────────────────────────
+
+        /// <summary>The delta this player's clock runs on, per its <see cref="TimeSource"/>.</summary>
+        internal float PlaybackDeltaTime => timeSource == HapTimeSource.UnscaledGameTime
+            ? UnityEngine.Time.unscaledDeltaTime
+            : UnityEngine.Time.deltaTime;
 
         /// <summary>
-        /// Advance the clock by <paramref name="deltaTime"/> seconds, upload whatever has been
-        /// decoded, and render it. Update supplies the frame's delta; tests supply their own.
+        /// The first half of a playback tick: advance the clock by <paramref name="deltaTime"/>
+        /// seconds and ask the decoder for the frame it landed on.
         /// </summary>
-        internal void TickPlayback(float deltaTime)
+        /// <returns>
+        /// True when a decoded frame is waiting to go to the GPU, which is what puts this player
+        /// in the tick's upload phase. The loop finishes every other player with
+        /// <see cref="TickRender"/> instead.
+        /// </returns>
+        internal bool TickClock(float deltaTime)
         {
-            if (_playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon)
+            if (!Lifecycle.IsOpen) return false;
+
+            using (s_ClockMarker.Auto())
             {
-                var evt = _playbackClock.Advance(deltaTime, playbackSpeed, Duration, loop);
-
-                switch (evt)
+                if (_playing && Mathf.Abs(playbackSpeed) > k_PlaybackSpeedEpsilon)
                 {
-                    case ClockAdvanceEvent.Looped:
-                        PlaybackLooped?.Invoke();
-                        break;
-                    case ClockAdvanceEvent.Completed:
-                        _playing = false;
-                        PlaybackCompleted?.Invoke();
-                        break;
-                }
+                    var evt = _playbackClock.Advance(deltaTime, playbackSpeed, Duration, loop);
 
-                // Those handlers are free to close this player or open another file, which takes
-                // the session and the pipeline out from under the rest of this tick. Everything
-                // below does nothing without them.
-                SeekDecodeToClock();
+                    switch (evt)
+                    {
+                        case ClockAdvanceEvent.Looped:
+                            PlaybackLooped?.Invoke();
+                            break;
+                        case ClockAdvanceEvent.Completed:
+                            _playing = false;
+                            PlaybackCompleted?.Invoke();
+                            break;
+                    }
+
+                    // Those handlers are free to close this player or open another file, which
+                    // takes the session and the pipeline out from under the rest of this tick.
+                    // Everything below does nothing without them.
+                    SeekDecodeToClock();
+                }
             }
 
+            return HasFrameToUpload;
+        }
+
+        /// <summary>
+        /// The second half of a tick for a player the upload phase picked: push the decoded frame
+        /// to the GPU, show it, and swap the display buffer behind it.
+        /// </summary>
+        internal void TickUpload()
+        {
             bool uploadedNewFrame;
             using (s_UploadMarker.Auto())
-                uploadedNewFrame = UploadFrame();
+                uploadedNewFrame = Lifecycle.Pipeline?.Present() ?? false;
 
-            using (s_RenderMarker.Auto())
-                RenderFrame();
+            TickRender();
 
             if (uploadedNewFrame)
                 Lifecycle.Pipeline?.SwapBuffers();
         }
+
+        /// <summary>
+        /// The end of a tick that uploads nothing: no new frame was decoded, or the loop's upload
+        /// budget deferred this player to a later tick. What is already on the GPU still has to
+        /// reach its target — and <see cref="RenderFrame"/> skips even that when nothing about it
+        /// changed.
+        /// </summary>
+        internal void TickRender()
+        {
+            using (s_RenderMarker.Auto())
+                RenderFrame();
+        }
+
+        /// <summary>
+        /// Whether the decode thread has a frame waiting that this player has not shown yet.
+        /// Answered without pinning the frame, since it is asked of every player every tick and
+        /// only decides who takes part in the upload phase.
+        /// </summary>
+        bool HasFrameToUpload
+        {
+            get
+            {
+                var pipeline = Lifecycle.Pipeline;
+                if (pipeline == null) return false;
+
+                // Nothing goes to the GPU in the frame the file opened in: D3D12 requires at
+                // least one command-list flush between RenderTexture.Create() and the first blit
+                // that targets it.
+                if (UnityEngine.Time.frameCount == _openedFrame) return false;
+
+                return pipeline.HasPendingFrame;
+            }
+        }
+
+        long IHapUploadTarget.PendingUploadBytes => Lifecycle.Pipeline?.UploadBytes ?? 0;
+
+        void IHapUploadTarget.TickUpload() => TickUpload();
+
+        void IHapUploadTarget.TickRender() => TickRender();
 
         /// <summary>
         /// Ask the decoder for the frame the clock is now on, reading ahead in the direction
@@ -481,16 +563,6 @@ namespace Bluecadet.Hap
 
             int direction = playbackSpeed > 0f ? 1 : -1;
             Lifecycle.Session.RequestDecode(_playbackClock.ToFrame(FrameCount, FrameRate), direction);
-        }
-
-        bool UploadFrame()
-        {
-            var pipeline = Lifecycle.Pipeline;
-            if (pipeline == null) return false;
-            // Skip GPU uploads in the same frame that the file opened in. D3D12 requires at least
-            // one command-list flush between RenderTexture.Create() and the first blit that targets it.
-            if (UnityEngine.Time.frameCount == _openedFrame) return false;
-            return pipeline.Present();
         }
 
         /// <summary>

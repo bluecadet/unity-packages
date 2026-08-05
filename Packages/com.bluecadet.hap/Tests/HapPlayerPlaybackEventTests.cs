@@ -5,8 +5,9 @@ namespace Bluecadet.Hap.Tests
 {
     /// <summary>
     /// Playback events are raised in the middle of a frame's work, and handlers are entitled to
-    /// close the player or swap its file from there. These tests drive the clock directly so
-    /// the boundaries are hit deterministically without a running player loop.
+    /// close the player or swap its file from there. These tests drive the central tick with a
+    /// delta of their own so the boundaries are hit deterministically without a running engine
+    /// loop.
     /// </summary>
     [TestFixture]
     public class HapPlayerPlaybackEventTests : HapPlayerTestFixture
@@ -35,7 +36,7 @@ namespace Bluecadet.Hap.Tests
 
             // Run past the end of the video in one step: the handler closes the player from
             // inside the event, which takes the session out from under the rest of the tick.
-            Assert.DoesNotThrow(() => Player.TickPlayback(Player.Duration * 2f));
+            Assert.DoesNotThrow(() => HapMainLoop.Tick(Player.Duration * 2f));
 
             Assert.That(completed, Is.EqualTo(1));
             Assert.That(Player.IsPlaying, Is.False);
@@ -55,7 +56,7 @@ namespace Bluecadet.Hap.Tests
             Player.PlaybackCompleted += () => close = Player.CloseAsync();
 
             Player.Play();
-            Assert.DoesNotThrow(() => Player.TickPlayback(Player.Duration * 2f));
+            Assert.DoesNotThrow(() => HapMainLoop.Tick(Player.Duration * 2f));
 
             Assert.That(close, Is.Not.Null);
             HapTestFixtures.Await(close);
@@ -79,7 +80,7 @@ namespace Bluecadet.Hap.Tests
             Player.Play();
 
             // The loop boundary fires, and the handler swaps the file mid-tick.
-            Assert.DoesNotThrow(() => Player.TickPlayback(Player.Duration * 1.5f));
+            Assert.DoesNotThrow(() => HapMainLoop.Tick(Player.Duration * 1.5f));
             Assert.That(looped, Is.EqualTo(1));
 
             Assert.That(HapTestFixtures.PollUntil(() => Player.IsOpen), Is.True,
@@ -97,7 +98,7 @@ namespace Bluecadet.Hap.Tests
             Player.PlaybackLooped += () => looped++;
             Player.Play();
 
-            Assert.DoesNotThrow(() => Player.TickPlayback(Player.Duration * 1.5f));
+            Assert.DoesNotThrow(() => HapMainLoop.Tick(Player.Duration * 1.5f));
 
             Assert.That(looped, Is.EqualTo(1));
             Assert.That(Player.IsPlaying, Is.True);

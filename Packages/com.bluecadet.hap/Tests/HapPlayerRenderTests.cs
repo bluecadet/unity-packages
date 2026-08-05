@@ -7,12 +7,15 @@ using UnityEngine.TestTools;
 namespace Bluecadet.Hap.Tests
 {
     /// <summary>
-    /// <see cref="HapPlayer.TickPlayback"/> renders every tick, but the GPU work behind
+    /// Every central tick ends in a render for every player, but the GPU work behind
     /// <see cref="HapRenderMode.RenderTexture"/> and <see cref="HapRenderMode.MaterialOverride"/>
     /// must only actually run when something it depends on changed — not on every tick a paused
     /// or capped-framerate video sits through. <see cref="HapPlayer.RenderWorkCount"/> is a test
     /// seam that counts calls that did that work, so these assert on it rather than the GPU
     /// output itself.
+    ///
+    /// These drive the central tick with an explicit delta, the way the runtime drives every
+    /// registered player, rather than poking the player directly.
     /// </summary>
     [TestFixture]
     public class HapPlayerRenderTests : HapPlayerTestFixture
@@ -56,19 +59,18 @@ namespace Bluecadet.Hap.Tests
         }
 
         [Test]
-        public void RenderTexture_FirstTickAfterOpen_DoesRealWork()
+        public void RenderTexture_TickThatOpensTheFile_RendersTheInitialFrame()
         {
             Player.RenderMode = HapRenderMode.RenderTexture;
             Player.TargetRenderTexture = MakeTarget();
 
+            // The open lands inside a central tick, and a tick renders after it has carried every
+            // player's lifecycle forward — so the tick that finished the open shows what it
+            // produced, exactly once.
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            Assert.That(Player.RenderWorkCount, Is.EqualTo(0), "opening alone must not render");
-
-            Player.TickPlayback(0f);
-
             Assert.That(Player.RenderWorkCount, Is.EqualTo(1),
-                "the first tick after open must render the initial frame");
+                "the tick that finished the open must render the initial frame once");
         }
 
         [Test]
@@ -78,23 +80,23 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
             int baseline = Player.RenderWorkCount;
             Assert.That(baseline, Is.GreaterThan(0));
 
             // Not playing, nothing decoded, nothing reassigned: this tick has nothing new to show.
-            Player.TickPlayback(0f);
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
+            HapMainLoop.Tick(0f);
 
             Assert.That(Player.RenderWorkCount, Is.EqualTo(baseline),
                 "a steady-state tick with no new frame re-did the render work");
         }
 
         /// <summary>
-        /// A UnityTest, not a plain Test: <see cref="HapPlayer.UploadFrame"/> refuses to present
-        /// in the same engine frame a file opened in (the D3D12 command-list-flush workaround),
-        /// and a synchronous Test never leaves that frame. Yielding lets real frames elapse so a
-        /// genuinely new decoded frame can reach <see cref="HapPlayer.RenderWorkCount"/>.
+        /// A UnityTest, not a plain Test: nothing is uploaded in the same engine frame a file
+        /// opened in (the D3D12 command-list-flush workaround), and a synchronous Test never
+        /// leaves that frame. Yielding lets real frames elapse so a genuinely new decoded frame
+        /// can reach <see cref="HapPlayer.RenderWorkCount"/>.
         /// </summary>
         [UnityTest]
         public IEnumerator RenderTexture_NewFrameUploaded_EventuallyRenders()
@@ -103,7 +105,7 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
             int baseline = Player.RenderWorkCount;
 
             Player.Play();
@@ -112,7 +114,8 @@ namespace Bluecadet.Hap.Tests
             var clock = Stopwatch.StartNew();
             while (!rendered && clock.ElapsedMilliseconds < HapTestFixtures.TimeoutMs)
             {
-                Player.TickPlayback(0.05f); // roughly a frame's worth at typical fixture frame rates
+                // Roughly a frame's worth at typical fixture frame rates.
+                HapMainLoop.Tick(0.05f);
                 if (Player.RenderWorkCount > baseline) rendered = true;
                 yield return null;
             }
@@ -127,11 +130,11 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
             int baseline = Player.RenderWorkCount;
 
             // Steady state first: confirm nothing renders again before the reassignment.
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
             Assert.That(Player.RenderWorkCount, Is.EqualTo(baseline));
 
             var secondTarget = new RenderTexture(HapTestFixtures.Width, HapTestFixtures.Height, 0,
@@ -140,7 +143,7 @@ namespace Bluecadet.Hap.Tests
             try
             {
                 Player.TargetRenderTexture = secondTarget;
-                Player.TickPlayback(0f);
+                HapMainLoop.Tick(0f);
 
                 Assert.That(Player.RenderWorkCount, Is.EqualTo(baseline + 1),
                     "reassigning the target render texture must re-render even with the same frame");
@@ -159,12 +162,12 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderer = MakeRenderer();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
             int baseline = Player.RenderWorkCount;
             Assert.That(baseline, Is.GreaterThan(0));
 
-            Player.TickPlayback(0f);
-            Player.TickPlayback(0f);
+            HapMainLoop.Tick(0f);
+            HapMainLoop.Tick(0f);
 
             Assert.That(Player.RenderWorkCount, Is.EqualTo(baseline),
                 "a steady-state tick with no new frame re-did the property block work");

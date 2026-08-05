@@ -56,6 +56,16 @@ namespace Bluecadet.Hap
         /// </summary>
         public RenderTexture DisplayTexture => _rts[_displayIndex];
 
+        /// <summary>
+        /// Whether the decode thread has published a frame <see cref="Present"/> has not uploaded
+        /// yet. The main loop asks this to decide who takes part in a tick's upload phase, so it
+        /// answers without pinning a slot; <see cref="Present"/> settles the question for real.
+        /// </summary>
+        public bool HasPendingFrame => _ring.TryPeekFrame(out int frameIndex) && frameIndex != _lastFrame;
+
+        /// <summary>Bytes one <see cref="Present"/> hands to the GPU.</summary>
+        public long UploadBytes => _ring.UploadBytes;
+
         /// <param name="textures">Per-texture format and size reported by the native plugin.</param>
         /// <param name="retireDepth">
         /// How many frames the GPU may lag behind the main thread — normally

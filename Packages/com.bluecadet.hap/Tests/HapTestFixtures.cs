@@ -80,13 +80,16 @@ namespace Bluecadet.Hap.Tests
         // ── Main-thread pumping ──────────────────────────────────────────────
 
         /// <summary>
-        /// One turn of the main-thread work the player depends on. Edit mode never runs
-        /// MonoBehaviour Update, so the tests drive the same loop the runtime does, and give
-        /// the decode thread a moment to make progress.
+        /// One turn of the main-thread work every player depends on — the same central tick the
+        /// runtime runs — and a moment for the decode thread to make progress.
+        ///
+        /// Ticks with a zero delta: a test that pumps to settle an open or a teardown has not
+        /// asked for playback to move, and letting the pump advance clocks would make every such
+        /// wait a source of frames nobody counted on.
         /// </summary>
         public static void Pump()
         {
-            HapMainLoop.Tick();
+            HapMainLoop.Tick(0f);
             Thread.Sleep(1);
         }
 

@@ -192,6 +192,28 @@ namespace Bluecadet.Hap
         }
 
         /// <summary>
+        /// The newest published frame index, without pinning the slot it lives in — the cheap
+        /// question "is there anything here worth uploading?", asked once per player per tick by
+        /// the main loop before it decides who uploads.
+        ///
+        /// Deliberately racy: the writer may publish another frame immediately after, and the
+        /// index read back may already be one frame stale. Nothing acts on it but the decision to
+        /// call <see cref="TryPin"/>, which settles the answer properly.
+        /// </summary>
+        public bool TryPeekFrame(out int frameIndex)
+        {
+            long snapshot = Interlocked.Read(ref _published);
+            if (snapshot == NoPublication)
+            {
+                frameIndex = -1;
+                return false;
+            }
+
+            frameIndex = _frameIndices[SlotOf(snapshot)];
+            return true;
+        }
+
+        /// <summary>
         /// Record that the slot's contents were handed to the GPU, starting its retire window.
         /// Call before <see cref="ClearPin"/>.
         /// </summary>
