@@ -60,6 +60,12 @@ namespace Bluecadet.Hap
         /// </summary>
         public bool IsValid { get; }
 
+        /// <summary>
+        /// Bytes one frame hands to the GPU: the raw data of every texture an
+        /// <see cref="Apply"/> pushes. What the main loop's upload budget is spent in.
+        /// </summary>
+        public long UploadBytes { get; }
+
         /// <param name="textures">Per-texture format and decoded size reported by the native plugin.</param>
         /// <param name="retireDepth">Frames the GPU may lag behind before a slot is reused.</param>
         public HapTextureRing(int width, int height, HapTextureInfo[] textures, int retireDepth)
@@ -115,6 +121,11 @@ namespace Bluecadet.Hap
                 }
             }
 
+            long uploadBytes = 0;
+            for (int t = 0; t < _textureCount; t++)
+                uploadBytes += _bufferSizes[t];
+
+            UploadBytes = uploadBytes;
             IsValid = valid;
         }
 
@@ -133,6 +144,13 @@ namespace Bluecadet.Hap
         public void CommitWrite(int slot, int frameIndex) => _slots.CommitWrite(slot, frameIndex);
 
         // ── Main thread ──────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The newest decoded frame's index, without pinning the slot it lives in — see
+        /// <see cref="HapSlotRing.TryPeekFrame"/> for what that costs in accuracy. Advisory only:
+        /// nothing here acts on the index it hands back, only <see cref="TryAcquire"/> does.
+        /// </summary>
+        public bool TryPeekFrame(out int frameIndex) => _slots.TryPeekFrame(out frameIndex);
 
         /// <summary>
         /// Take a lease on the newest decoded frame. The lease pins the slot against the

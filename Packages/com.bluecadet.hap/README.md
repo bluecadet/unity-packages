@@ -146,6 +146,7 @@ public float PlaybackSpeed { get; set; }              // clamped >= 0
 public RenderTexture TargetRenderTexture { get; set; }
 
 public static int DecodeThreadCount { get; set; }    // process-wide, see below
+public static long UploadBudgetBytesPerFrame { get; set; }    // process-wide, see below
 
 public event Action Opened;
 public event Action PlaybackCompleted;
@@ -167,6 +168,16 @@ playing, from its next chunked frame onward. It reads back `0` until
 assigned, meaning "use the plugin's default" (one thread per hardware thread
 minus the ones the engine needs).
 
+`HapPlayer.UploadBudgetBytesPerFrame` caps how many bytes of decoded video
+the shared main loop (see Lifecycle, above) hands to the GPU in one tick,
+across every open player. It is process-wide too, and defaults to `0`, which
+means no cap. A tick that would go over the cap does not drop a frame
+outright: the players it defers keep showing what they already uploaded and
+their clocks keep running, and each gets another chance to upload on its
+next turn. Worth setting once enough players are open at once that a tick's
+uploads would overrun the frame budget — it trades some dropped frames for a
+flat per-frame upload cost across all of them.
+
 ### Inspector Fields
 
 | Field | Description |
@@ -183,9 +194,24 @@ minus the ones the engine needs).
 ### Lifecycle
 
 - **OnEnable**: opens File Path, if set, and begins playback if Play On Enable is set
-- **OnDisable**: stops playback and starts releasing the file; a disabled player's teardown keeps advancing outside its own `Update`, so textures are still released promptly
+- **OnDisable**: stops playback and starts releasing the file; a disabled player's teardown keeps advancing, so textures are still released promptly
 - **OnDestroy**: same teardown as OnDisable, with a short bounded wait for the decode thread to park before Unity reclaims the textures
-- **Update**: advances the playback clock, requests the next decode, and uploads the ready frame to texture on the main thread
+
+Players do not tick themselves. While a player has a file open — or an open
+or close in flight — it is driven by one shared main-thread loop that
+advances every player's clock, decode request, texture upload and render.
+That loop is what lets uploads, the expensive main-thread part of playback,
+be spread across players rather than all landing in the same slice of a
+frame: it issues them starting from a different player each frame, and can
+be given a per-frame byte cap via `HapPlayer.UploadBudgetBytesPerFrame`,
+after which the remaining players keep showing the frame they already have
+and upload on a later frame instead.
+
+A disabled component or an inactive GameObject does not play: its clock does
+not advance and nothing of it is decoded, uploaded or rendered, matching a
+plain `MonoBehaviour.Update` player's behavior before this shared loop
+existed. Its open or close still runs to completion regardless, which is
+what lets OnDisable's teardown keep advancing while disabled.
 
 ## Architecture
 
@@ -203,7 +229,8 @@ reason instead of failing partway through playback.
 - **HapPlayer.cs** — MonoBehaviour facade: playback clock, rendering, serialized settings
 - **HapLifecycle.cs** — the awaitable open/close state machine behind HapPlayer
 - **HapTeardown.cs** — releases one closed file's decode thread, native handle, and GPU resources
-- **HapMainLoop.cs** — advances lifecycle work for disabled or destroyed players, in and out of play mode
+- **HapMainLoop.cs** — the one main-thread loop every player runs on: lifecycle, clocks, uploads and renders, in and out of play mode
+- **HapUploadPhase.cs** — the upload half of a tick: rotation and the per-frame byte budget
 
 ## Performance with many concurrent players
 
