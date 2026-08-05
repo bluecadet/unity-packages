@@ -60,6 +60,11 @@ fn fuzzDecode(context: void, smith: *testing.Smith) !void {
     const frame = buf[0..len];
     const count = hap_decode.frameTextureCount(frame) catch return;
 
+    // One decode-time scratch buffer per fuzz iteration, the way a real
+    // Handle reuses one across every frame it decodes.
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+
     // One index past the last claimed texture (when the frame claims no more
     // than the ABI supports) must be rejected rather than decoded.
     const probe = @min(count, max_textures);
@@ -68,10 +73,10 @@ fn fuzzDecode(context: void, smith: *testing.Smith) !void {
         var out = std.ArrayListUnmanaged(u8).empty;
         defer out.deinit(testing.allocator);
 
-        _ = hap_decode.decodeTexture(testing.allocator, frame, index, &out) catch continue;
+        _ = hap_decode.decodeTexture(testing.allocator, frame, index, &out, &scratch) catch continue;
 
         if (index >= count) return error.DecodedOutOfRangeTexture;
-        try expectCallerBufferDecodeMatches(frame, index, out.items);
+        try expectCallerBufferDecodeMatches(frame, index, out.items, &scratch);
     }
 }
 
@@ -83,14 +88,14 @@ fn fuzzDecode(context: void, smith: *testing.Smith) !void {
 /// the size this frame already decoded to, and decoding is a pure function
 /// of the frame bytes, so the list never has to grow past the capacity it
 /// starts with and the allocator is never asked to move it.
-fn expectCallerBufferDecodeMatches(frame: []const u8, index: u32, expected: []const u8) !void {
+fn expectCallerBufferDecodeMatches(frame: []const u8, index: u32, expected: []const u8, scratch: *hap_decode.ChunkScratch) !void {
     if (expected.len == 0) return;
 
     const dst = try testing.allocator.alloc(u8, expected.len);
     defer testing.allocator.free(dst);
 
     var out: std.ArrayListUnmanaged(u8) = .{ .items = dst[0..0], .capacity = dst.len };
-    _ = try hap_decode.decodeTexture(testing.allocator, frame, index, &out);
+    _ = try hap_decode.decodeTexture(testing.allocator, frame, index, &out, scratch);
 
     try testing.expect(out.items.ptr == dst.ptr);
     try testing.expectEqualSlices(u8, expected, out.items);

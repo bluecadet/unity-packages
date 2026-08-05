@@ -335,8 +335,23 @@ const ChunkJob = struct {
     dst_off: usize,
     dst_len: usize,
     dst: []u8 = &.{},
-    ok: bool = false,
+    /// Invariant: initialized true while planning (single-threaded, before
+    /// the pool fans out) and left alone by a worker that succeeds. A worker
+    /// writes this field only on failure -- the rare path -- so steady-state
+    /// decoding never has more than one thread writing into a given cache
+    /// line of the jobs array (adjacent jobs share lines at this struct's
+    /// stride), avoiding cross-thread cache-line ping-pong on every chunk.
+    ok: bool = true,
 };
+
+/// Grow-only scratch storage for one handle's `ChunkJob` array, reused
+/// across every chunked decode on that handle instead of being heap
+/// allocated and freed per frame. Safe because a handle is driven serially
+/// by one thread and `execute` below is synchronous fork-join: the array is
+/// never touched by another decode while a pool batch is in flight. Never
+/// shrinks capacity between frames; `resize` only ever grows the backing
+/// allocation and cheaply narrows/widens the logical length otherwise.
+pub const ChunkScratch = std.ArrayListUnmanaged(ChunkJob);
 
 /// InnerThreadPool work function: decode chunk `index` of the job list `p`
 /// points at (a `*[]ChunkJob`). Each invocation touches a distinct job, so
@@ -347,28 +362,33 @@ fn decodeChunkWorker(p: ?*anyopaque, index: c_uint) void {
     const job = &jobs.*[index];
     switch (job.compressor) {
         compressor_snappy => {
-            snappyDecompressExact(job.src, job.dst) catch return; // job.ok stays false
-            job.ok = true;
+            snappyDecompressExact(job.src, job.dst) catch {
+                job.ok = false;
+                return;
+            };
         },
         compressor_none => {
             if (job.src.len == job.dst.len) {
                 @memcpy(job.dst, job.src);
-                job.ok = true;
+            } else {
+                job.ok = false;
             }
         },
-        else => {}, // job.ok stays false
+        else => job.ok = false,
     }
 }
 
 /// Decode a Complex (chunked) texture section into `out`, sized exactly to
-/// the summed uncompressed chunk lengths.
-fn decodeComplex(allocator: std.mem.Allocator, payload: []const u8, out: *std.ArrayListUnmanaged(u8)) DecodeError!void {
+/// the summed uncompressed chunk lengths. `scratch` is the handle's reused
+/// `ChunkJob` buffer; it is resized (grown, never shrunk in capacity) to
+/// exactly `n` entries for the duration of this call.
+fn decodeComplex(allocator: std.mem.Allocator, payload: []const u8, out: *std.ArrayListUnmanaged(u8), scratch: *ChunkScratch) DecodeError!void {
     const instr = try parseComplexInstructions(payload);
     const n = instr.chunk_count;
     if (n == 0) return error.InvalidFrame;
 
-    var jobs = try allocator.alloc(ChunkJob, n);
-    defer allocator.free(jobs);
+    try scratch.resize(allocator, n);
+    var jobs: []ChunkJob = scratch.items;
 
     // Plan every chunk: validate its compressor, bound its compressed span
     // against the frame data, and accumulate the exact output size.
@@ -429,6 +449,7 @@ pub fn decodeTexture(
     frame: []const u8,
     index: u32,
     out: *std.ArrayListUnmanaged(u8),
+    scratch: *ChunkScratch,
 ) DecodeError!HapTextureFormat {
     const sec = try sectionAtIndex(frame, index);
     // Validate the texture format before decoding (matches the reference
@@ -444,7 +465,7 @@ pub fn decodeTexture(
             try out.resize(allocator, try snappyLength(sec.payload));
             try snappyDecompressExact(sec.payload, out.items);
         },
-        compressor_complex => try decodeComplex(allocator, sec.payload, out),
+        compressor_complex => try decodeComplex(allocator, sec.payload, out, scratch),
         else => return error.InvalidFrame,
     }
 

@@ -159,6 +159,12 @@ pub const Handle = struct {
     cached_index: i64 = -1,
     cached_sample: []const u8 = &.{},
 
+    /// Scratch storage for a chunked (Complex) decode's `ChunkJob` array,
+    /// reused across every frame this handle decodes instead of being heap
+    /// allocated and freed per frame. Safe because a handle is driven
+    /// serially by one thread. See `core.hap_decode.ChunkScratch`.
+    chunk_scratch: core.hap_decode.ChunkScratch = .empty,
+
     fn sample(self: *Handle, frame_index: u32) ?[]const u8 {
         if (self.cached_index == @as(i64, frame_index)) return self.cached_sample;
         const data = self.demux.sampleData(&self.reader, frame_index) orelse return null;
@@ -169,6 +175,7 @@ pub const Handle = struct {
 
     fn destroy(self: *Handle) void {
         const alloc = self.alloc; // copied out: `self` is gone by the last line
+        self.chunk_scratch.deinit(alloc);
         self.demux.deinit(alloc);
         self.reader.deinit();
         alloc.destroy(self);
@@ -429,7 +436,7 @@ pub export fn hap_decode_texture(
     // caller asked for (in a safety-checked build).
     defer if (out.items.ptr != dst) out.deinit(guarded);
 
-    _ = core.hap_decode.decodeTexture(guarded, data, @intCast(tex_index), &out) catch |err|
+    _ = core.hap_decode.decodeTexture(guarded, data, @intCast(tex_index), &out, &h.chunk_scratch) catch |err|
         return code(errorCode(err));
 
     // The list only moves off the caller's buffer when the decoded texture

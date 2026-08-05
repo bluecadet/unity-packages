@@ -83,12 +83,14 @@ test "frameTextureFormat maps the format nibble" {
 
 test "decodeTexture rejects BC6H (Hap HDR) format nibbles" {
     const payload = [_]u8{0} ** 8;
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
     inline for (.{ 0xA2, 0xA3 }) |type_byte| { // None|BC6H-unsigned / -signed
         const frame = try test_support.buildSection(testing.allocator, type_byte, &payload);
         defer testing.allocator.free(frame);
         var out = std.ArrayListUnmanaged(u8).empty;
         defer out.deinit(testing.allocator);
-        try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out));
+        try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out, &scratch));
     }
 }
 
@@ -99,7 +101,9 @@ test "decodeTexture copies a None-compressor texture verbatim" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    const fmt = try decodeTexture(testing.allocator, frame, 0, &out);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    const fmt = try decodeTexture(testing.allocator, frame, 0, &out, &scratch);
     try testing.expectEqual(HapTextureFormat.rgb_dxt1, fmt);
     try testing.expectEqualSlices(u8, &bc, out.items);
 }
@@ -115,7 +119,9 @@ test "decodeTexture decodes a multi-chunk None Complex frame (offset table absen
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    const fmt = try decodeTexture(testing.allocator, frame, 0, &out);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    const fmt = try decodeTexture(testing.allocator, frame, 0, &out, &scratch);
     try testing.expectEqual(HapTextureFormat.rgb_dxt1, fmt);
     try testing.expectEqualSlices(u8, &(c0 ++ c1 ++ c2), out.items);
 }
@@ -132,7 +138,9 @@ test "decodeTexture decodes a Complex frame with an explicit offset table" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    _ = try decodeTexture(testing.allocator, frame, 0, &out);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    _ = try decodeTexture(testing.allocator, frame, 0, &out, &scratch);
     try testing.expectEqualSlices(u8, &(c0 ++ c1), out.items);
 }
 
@@ -153,7 +161,9 @@ test "parseComplexInstructions skips unknown sub-sections" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    _ = try decodeTexture(testing.allocator, frame, 0, &out);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    _ = try decodeTexture(testing.allocator, frame, 0, &out, &scratch);
     try testing.expectEqualSlices(u8, &c0, out.items);
 }
 
@@ -182,7 +192,9 @@ test "decodeTexture rejects a chunk with a bad compressor byte" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out));
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out, &scratch));
 }
 
 test "decodeTexture rejects a Complex frame with zero chunks" {
@@ -195,7 +207,9 @@ test "decodeTexture rejects a Complex frame with zero chunks" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out));
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out, &scratch));
 }
 
 test "decodeComplex bounds-checks a chunk size against the frame data" {
@@ -210,7 +224,9 @@ test "decodeComplex bounds-checks a chunk size against the frame data" {
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out));
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 0, &out, &scratch));
 }
 
 // -----------------------------------------------------------------------
@@ -242,9 +258,11 @@ test "decodeTexture decodes each texture of a multi-image frame from its own ind
     defer out0.deinit(testing.allocator);
     var out1 = std.ArrayListUnmanaged(u8).empty;
     defer out1.deinit(testing.allocator);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
 
-    try testing.expectEqual(HapTextureFormat.rgb_dxt1, try decodeTexture(testing.allocator, frame, 0, &out0));
-    try testing.expectEqual(HapTextureFormat.ycocg_dxt5, try decodeTexture(testing.allocator, frame, 1, &out1));
+    try testing.expectEqual(HapTextureFormat.rgb_dxt1, try decodeTexture(testing.allocator, frame, 0, &out0, &scratch));
+    try testing.expectEqual(HapTextureFormat.ycocg_dxt5, try decodeTexture(testing.allocator, frame, 1, &out1, &scratch));
 
     try testing.expectEqualSlices(u8, &block0, out0.items);
     try testing.expectEqualSlices(u8, &block1, out1.items);
@@ -260,7 +278,9 @@ test "decodeTexture rejects a texture index past the end of a multi-image frame"
 
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 1, &out));
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+    try testing.expectError(error.InvalidFrame, decodeTexture(testing.allocator, frame, 1, &out, &scratch));
 }
 
 // -----------------------------------------------------------------------
@@ -299,14 +319,16 @@ test "decodeTexture output of a Snappy-chunked frame is byte-identical to unchun
     defer out_unchunked.deinit(testing.allocator);
     var out_chunked = std.ArrayListUnmanaged(u8).empty;
     defer out_chunked.deinit(testing.allocator);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
 
     try testing.expectEqual(
         HapTextureFormat.rgb_dxt1,
-        try decodeTexture(testing.allocator, unchunked, 0, &out_unchunked),
+        try decodeTexture(testing.allocator, unchunked, 0, &out_unchunked, &scratch),
     );
     try testing.expectEqual(
         HapTextureFormat.rgb_dxt1,
-        try decodeTexture(testing.allocator, chunked, 0, &out_chunked),
+        try decodeTexture(testing.allocator, chunked, 0, &out_chunked, &scratch),
     );
 
     try testing.expectEqualSlices(u8, &bc1_blocks, out_unchunked.items);
@@ -332,12 +354,13 @@ fn decodeFixtureTexture(
     path: []const u8,
     index: u32,
     out: *std.ArrayListUnmanaged(u8),
+    scratch: *hap_decode.ChunkScratch,
 ) !HapTextureFormat {
     var fixture = try test_support.openFixture(path);
     defer fixture.deinit();
 
     try testing.expect(fixture.demuxer.track.frame_count > 0);
-    return decodeTexture(testing.allocator, try fixture.sample(0), index, out);
+    return decodeTexture(testing.allocator, try fixture.sample(0), index, out, scratch);
 }
 
 test "decodeTexture per-codec fixtures decode to the expected format and byte count" {
@@ -353,11 +376,14 @@ test "decodeTexture per-codec fixtures decode to the expected format and byte co
         .{ .path = fixture_hapy, .format = .ycocg_dxt5, .bytes = 230400 },
     };
 
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+
     for (cases) |c| {
         var out = std.ArrayListUnmanaged(u8).empty;
         defer out.deinit(testing.allocator);
 
-        const format = decodeFixtureTexture(c.path, 0, &out) catch |err| switch (err) {
+        const format = decodeFixtureTexture(c.path, 0, &out, &scratch) catch |err| switch (err) {
             error.SkipZigTest => continue, // fixture missing: skip this case
             else => return err,
         };
@@ -378,17 +404,20 @@ test "decodeTexture chunked fixtures decode byte-identical to their unchunked co
         .{ .unchunked = fixture_hapy, .chunked = "tests/fixtures/hapy_chunked.mov" },
     };
 
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
+
     for (cases) |c| {
         var unchunked = std.ArrayListUnmanaged(u8).empty;
         defer unchunked.deinit(testing.allocator);
         var chunked = std.ArrayListUnmanaged(u8).empty;
         defer chunked.deinit(testing.allocator);
 
-        _ = decodeFixtureTexture(c.unchunked, 0, &unchunked) catch |err| switch (err) {
+        _ = decodeFixtureTexture(c.unchunked, 0, &unchunked, &scratch) catch |err| switch (err) {
             error.SkipZigTest => continue, // fixture pair missing: skip this case
             else => return err,
         };
-        _ = try decodeFixtureTexture(c.chunked, 0, &chunked);
+        _ = try decodeFixtureTexture(c.chunked, 0, &chunked, &scratch);
 
         try testing.expectEqualSlices(u8, unchunked.items, chunked.items);
     }
@@ -397,8 +426,10 @@ test "decodeTexture chunked fixtures decode byte-identical to their unchunked co
 test "decodeTexture Hap1 fixture frame0 matches the committed golden texture" {
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(testing.allocator);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
 
-    _ = try decodeFixtureTexture(fixture_hap1, 0, &out);
+    _ = try decodeFixtureTexture(fixture_hap1, 0, &out, &scratch);
 
     try test_support.expectMatchesGolden("tests/fixtures/hap1_golden.bin", out.items);
 }
@@ -412,9 +443,11 @@ test "decodeTexture Hap Q Alpha fixture frame0 decodes both textures against the
     defer color.deinit(testing.allocator);
     var alpha = std.ArrayListUnmanaged(u8).empty;
     defer alpha.deinit(testing.allocator);
+    var scratch: hap_decode.ChunkScratch = .empty;
+    defer scratch.deinit(testing.allocator);
 
-    const color_format = try decodeFixtureTexture(fixture_hapm, 0, &color);
-    const alpha_format = try decodeFixtureTexture(fixture_hapm, 1, &alpha);
+    const color_format = try decodeFixtureTexture(fixture_hapm, 0, &color, &scratch);
+    const alpha_format = try decodeFixtureTexture(fixture_hapm, 1, &alpha, &scratch);
 
     try testing.expectEqual(HapTextureFormat.ycocg_dxt5, color_format);
     try testing.expectEqual(HapTextureFormat.a_rgtc1, alpha_format);
