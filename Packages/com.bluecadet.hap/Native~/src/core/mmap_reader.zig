@@ -6,12 +6,21 @@
 //! or a failed `mmap` are all reported as errors.
 //!
 //! Paging: the whole file is mapped, so every byte the decoder touches is a
-//! page fault against the file. Two advisory hints keep those faults from
-//! serializing into single-page reads on a cold page cache -- a
-//! sequential-access hint at open time, and `prefetch`, which asks the
+//! page fault against the file. `prefetch` keeps those faults from
+//! serializing into single-page reads on a cold page cache: it asks the
 //! kernel to fault a specific byte range in ahead of use (the decode loop
-//! points it at the next frame's sample). Both are pure hints: a failure
-//! costs performance, never correctness, so both swallow it.
+//! points it at the next frame's sample). Pure hint: a failure costs
+//! performance, never correctness, so it's swallowed.
+//!
+//! A whole-mapping sequential-access hint is issued at open time on Windows
+//! only (`FILE_FLAG_SEQUENTIAL_SCAN`; see `initWindows`). POSIX deliberately
+//! issues none: `madvise(MADV.SEQUENTIAL)` would make the kernel reclaim
+//! pages behind the read point far more aggressively, which is fine for a
+//! single front-to-back pass but punishes looping playback -- exactly this
+//! decoder's normal access pattern -- by turning every loop-back into a full
+//! re-fault of frame 0's pages. Per-frame `prefetch` (`MADV.WILLNEED`)
+//! already covers readahead without that trade-off, so it's the only hint
+//! POSIX gets.
 //!
 //! Design notes:
 //!   * Failures are reported via a Zig error union.
@@ -226,13 +235,19 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_READ: u32 = 0x01;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-/// Cache-manager hint that the file is read front to back. There is no
-/// POSIX equivalent here: `F_RDAHEAD`/`POSIX_FADV_SEQUENTIAL` are state on
-/// the file descriptor, and `initPosix` closes its fd as soon as the
-/// mapping exists, so a POSIX version of this hint would be discarded
-/// before it could affect a single page fault. This flag survives because
-/// it is set on the file object at `CreateFileA` time and the mapping
-/// holds a reference to that object, not to a descriptor that gets closed.
+/// Cache-manager hint that the file is read front to back. This flag
+/// survives past `init` because it is set on the file object at
+/// `CreateFileA` time and the mapping holds a reference to that object, not
+/// to a descriptor that gets closed (unlike `F_RDAHEAD`/`POSIX_FADV_SEQUENTIAL`,
+/// which are state on a POSIX file descriptor that `initPosix` closes as
+/// soon as the mapping exists).
+///
+/// `initPosix` does have a mapping-wide equivalent available --
+/// `madvise(MADV.SEQUENTIAL)`, which needs no fd -- but deliberately doesn't
+/// call it: it would make the kernel reclaim pages behind the read point far
+/// more aggressively, which punishes this decoder's normal looping-playback
+/// access pattern (see the module doc). Per-frame `prefetch` covers
+/// readahead on POSIX instead.
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const PAGE_READONLY: u32 = 0x02;
 const FILE_MAP_READ: u32 = 0x0004;
