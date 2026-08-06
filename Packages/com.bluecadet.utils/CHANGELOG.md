@@ -2,6 +2,12 @@
 
 All notable changes will be documented here.
 
+## [Unreleased]
+
+### Removed
+
+- Remove Setup Script Templates menu item; set a Root Namespace on your assembly definition instead
+
 ## [1.2.0] - 2026-05-28
 
 ### Added
