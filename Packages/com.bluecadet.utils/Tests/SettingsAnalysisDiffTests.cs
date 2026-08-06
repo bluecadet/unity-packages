@@ -93,5 +93,68 @@ namespace Bluecadet.Utils.Tests
 
 			Assert.That(Diff(before, after), Is.EqualTo(new[] { "general.debugMode" }));
 		}
+
+		[Test]
+		public void DeeplyNestedFieldChanged_MarksFullDottedPath()
+		{
+			const string before = @"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": false } } } }";
+			const string after = @"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true } } } }";
+
+			Assert.That(Diff(before, after), Is.EqualTo(new[] { "app.display.window.fullscreen" }));
+		}
+
+		[Test]
+		public void DeeplyNestedFieldChanged_UnchangedDeepSiblingsStayClean()
+		{
+			const string before = @"{
+				""app"": {
+					""label"": ""keep"",
+					""display"": {
+						""index"": 1,
+						""window"": { ""fullscreen"": false, ""scale"": 1.0 }
+					},
+					""audio"": { ""mixer"": { ""volume"": 0.5 } }
+				}
+			}";
+			const string after = @"{
+				""app"": {
+					""label"": ""keep"",
+					""display"": {
+						""index"": 1,
+						""window"": { ""fullscreen"": true, ""scale"": 1.0 }
+					},
+					""audio"": { ""mixer"": { ""volume"": 0.5 } }
+				}
+			}";
+
+			Assert.That(Diff(before, after), Is.EqualTo(new[] { "app.display.window.fullscreen" }));
+		}
+
+		[Test]
+		public void DeeplyNestedArrayElementChanged_MarksArrayLeafPath()
+		{
+			const string before = @"{ ""app"": { ""display"": { ""window"": { ""tags"": [""a"", ""b""] } } } }";
+			const string after = @"{ ""app"": { ""display"": { ""window"": { ""tags"": [""a"", ""c""] } } } }";
+
+			Assert.That(Diff(before, after), Is.EqualTo(new[] { "app.display.window.tags" }));
+		}
+
+		[Test]
+		public void DeeplyNestedObjectMissingFromBefore_MarksEachDeepLeaf()
+		{
+			const string before = @"{ ""app"": {} }";
+			const string after = @"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true, ""scale"": 2.0 } } } }";
+
+			Assert.That(Diff(before, after), Is.EquivalentTo(new[] { "app.display.window.fullscreen", "app.display.window.scale" }));
+		}
+
+		[Test]
+		public void MultipleDeepBranchesChanged_MarksEachPath()
+		{
+			const string before = @"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": false } }, ""audio"": { ""mixer"": { ""volume"": 0.5 } } } }";
+			const string after = @"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true } }, ""audio"": { ""mixer"": { ""volume"": 0.9 } } } }";
+
+			Assert.That(Diff(before, after), Is.EquivalentTo(new[] { "app.display.window.fullscreen", "app.audio.mixer.volume" }));
+		}
 	}
 }

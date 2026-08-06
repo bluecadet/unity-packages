@@ -176,6 +176,24 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		[Test]
+		public void SaveDirtyPaths_ToBase_UnrelatedDirtyPathNoOpOnLocal_PreservesDeliberatelyEmptyObject()
+		{
+			// "advanced" is an object the user deliberately left empty in Local; the "advanced.feature" dirty
+			// path has nothing to remove there. That no-op must not prune "advanced" away just because
+			// "general.debugMode" (an unrelated dirty path) genuinely strips its own Local override.
+			WriteLocal(@"{ ""general"": { ""debugMode"": true }, ""advanced"": {} }");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true }, ""advanced"": { ""feature"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode", "advanced.feature" });
+
+			JObject writtenLocal = Read(LocalPath);
+			Assert.That(writtenLocal, Is.Not.Null);
+			Assert.That(writtenLocal.ContainsKey("general"), Is.False);
+			Assert.That(writtenLocal.ContainsKey("advanced"), Is.True);
+			Assert.That(((JObject)writtenLocal["advanced"]).HasValues, Is.False);
+		}
+
+		[Test]
 		public void SaveDirtyPaths_TargetCli_Throws()
 		{
 			var fullValue = new JObject();
@@ -209,6 +227,187 @@ namespace Bluecadet.Utils.Tests
 
 			JObject written = Read(BasePath);
 			Assert.That(written["general"]["tags"].ToObject<string[]>(), Is.EqualTo(new[] { "a", "b" }));
+		}
+
+		// --- Deeply nested settings classes -------------------------------------------------------
+		//
+		// A real settings class nests objects several levels down, so every tier-write rule has to hold
+		// for dotted paths like "app.display.window.fullscreen", not just for one level of grouping.
+
+		private const string _deepPath = "app.display.window.fullscreen";
+		private const string _deepSiblingPath = "app.display.window.scale";
+
+		private sealed class DeepSettings
+		{
+			public AppSection app = new();
+		}
+
+		private sealed class AppSection
+		{
+			public string label = "root";
+			public DisplaySection display = new();
+		}
+
+		private sealed class DisplaySection
+		{
+			public int index = 1;
+			public WindowSection window = new();
+		}
+
+		private sealed class WindowSection
+		{
+			public bool fullscreen;
+			public float scale = 1f;
+			public string[] tags = { "a" };
+		}
+
+		/// <summary>Serializes a settings class exactly the way the editor pane does before saving.</summary>
+		private static JObject Serialize(DeepSettings settings) => JObject.FromObject(settings, SettingsJson.Serializer);
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToBase_CreatesWholeNestedChain()
+		{
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { _deepPath });
+
+			JObject written = Read(BasePath);
+			Assert.That((bool)written["app"]["display"]["window"]["fullscreen"], Is.True);
+
+			// Sparse: only the dirty leaf, none of the siblings along the way.
+			Assert.That(((JObject)written["app"]).ContainsKey("label"), Is.False);
+			Assert.That(((JObject)written["app"]["display"]).ContainsKey("index"), Is.False);
+			Assert.That(((JObject)written["app"]["display"]["window"]).ContainsKey("scale"), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToBase_PreservesUnrelatedDeepSiblings()
+		{
+			WriteBase(@"{
+				""app"": {
+					""label"": ""keep"",
+					""display"": {
+						""index"": 3,
+						""window"": { ""fullscreen"": false, ""scale"": 2.0 }
+					},
+					""audio"": { ""mixer"": { ""volume"": 0.25 } }
+				}
+			}");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { _deepPath });
+
+			JObject written = Read(BasePath);
+			Assert.That((bool)written["app"]["display"]["window"]["fullscreen"], Is.True);
+			Assert.That((string)written["app"]["label"], Is.EqualTo("keep"));
+			Assert.That((int)written["app"]["display"]["index"], Is.EqualTo(3));
+			Assert.That((double)written["app"]["display"]["window"]["scale"], Is.EqualTo(2.0));
+			Assert.That((double)written["app"]["audio"]["mixer"]["volume"], Is.EqualTo(0.25));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToBase_StripsDeepShadowFromLocal_AndPrunesEmptiedParents()
+		{
+			WriteLocal(@"{ ""app"": { ""label"": ""keep"", ""display"": { ""window"": { ""fullscreen"": true } } } }");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { _deepPath });
+
+			JObject writtenLocal = Read(LocalPath);
+			Assert.That(writtenLocal, Is.Not.Null);
+			Assert.That((string)writtenLocal["app"]["label"], Is.EqualTo("keep"));
+
+			// "window" and then "display" are both emptied by the strip and must not be left behind.
+			Assert.That(((JObject)writtenLocal["app"]).ContainsKey("display"), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToBase_StripsDeepShadowFromLocal_KeepsDeepSiblingAndItsParents()
+		{
+			WriteLocal(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true, ""scale"": 4.0 } } } }");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { _deepPath });
+
+			JObject writtenLocal = Read(LocalPath);
+			Assert.That(((JObject)writtenLocal["app"]["display"]["window"]).ContainsKey("fullscreen"), Is.False);
+			Assert.That((double)writtenLocal["app"]["display"]["window"]["scale"], Is.EqualTo(4.0));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepShadowIsLocalsOnlyValue_DeletesLocalFile()
+		{
+			WriteLocal(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true } } } }");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { _deepPath });
+
+			Assert.That(File.Exists(LocalPath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToLocal_MatchesEffectiveBaseAndMachine_RemovesRedundantOverride()
+		{
+			WriteBase(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": false, ""scale"": 1.0 } } } }");
+			WriteMachine(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true } } } }");
+			WriteLocal(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": true } } } }");
+
+			// Matches the Machine tier, which wins over Base at this depth: Local must not keep the override.
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Local, Serialize(settings), new[] { _deepPath });
+
+			Assert.That(File.Exists(LocalPath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepFloatToLocal_MatchesEffectiveValue_RemovesRedundantOverride()
+		{
+			WriteBase(@"{ ""app"": { ""display"": { ""window"": { ""scale"": 0.1 } } } }");
+			WriteLocal(@"{ ""app"": { ""display"": { ""window"": { ""scale"": 0.1 } } } }");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.scale = 0.1f;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Local, Serialize(settings), new[] { _deepSiblingPath });
+
+			Assert.That(File.Exists(LocalPath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepPathToLocal_DiffersFromEffectiveValue_WritesWholeNestedChain()
+		{
+			WriteBase(@"{ ""app"": { ""display"": { ""window"": { ""fullscreen"": false } } } }");
+
+			var settings = new DeepSettings();
+			settings.app.display.window.fullscreen = true;
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Local, Serialize(settings), new[] { _deepPath });
+
+			JObject writtenLocal = Read(LocalPath);
+			Assert.That((bool)writtenLocal["app"]["display"]["window"]["fullscreen"], Is.True);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DeepArrayLeaf_IsWrittenWholesale()
+		{
+			var settings = new DeepSettings();
+			settings.app.display.window.tags = new[] { "a", "b" };
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, Serialize(settings), new[] { "app.display.window.tags" });
+
+			JObject written = Read(BasePath);
+			Assert.That(written["app"]["display"]["window"]["tags"].ToObject<string[]>(), Is.EqualTo(new[] { "a", "b" }));
 		}
 	}
 }
