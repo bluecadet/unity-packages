@@ -73,7 +73,12 @@ namespace Bluecadet.Utils
 			_current = Build();
 		}
 
-		private static AppEnvironment Build()
+		/// <summary>
+		/// Builds a fresh environment from the current process arguments. <see cref="Current"/> memoizes one
+		/// of these for the lifetime of the domain; editor tooling calls this directly when it needs to pick
+		/// up argument edits made since then. Main-thread only.
+		/// </summary>
+		internal static AppEnvironment Build()
 		{
 			var args = CommandLineArgs.FromProcess();
 			string streamingAssetsPath = Application.streamingAssetsPath;

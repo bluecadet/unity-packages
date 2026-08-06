@@ -81,7 +81,7 @@ namespace Bluecadet.Utils
 
 			try
 			{
-				_value = _cascade.Merged.ToObject<T>() ?? new T();
+				_value = _cascade.Merged.ToObject<T>(SettingsJson.Serializer) ?? new T();
 			}
 			catch (Exception ex)
 			{
