@@ -6,18 +6,18 @@ using Bluecadet.Utils.Editor;
 namespace Bluecadet.Utils.Tests
 {
 	/// <summary>
-	/// Covers <see cref="SettingsEditorPane.CollectChangedLeaves"/>: the pure JSON diff that decides which
+	/// Covers <see cref="SettingsAnalysis.CollectChangedLeaves"/>: the pure JSON diff that decides which
 	/// dotted paths actually changed value between draws, used instead of a per-leaf
 	/// <c>EditorGUI.BeginChangeCheck</c> so that expanding/collapsing an array or nested-object foldout
 	/// (which sets <c>GUI.changed</c> without changing any value) never marks a field dirty.
 	/// </summary>
 	[TestFixture]
-	public class SettingsEditorPaneDiffTests
+	public class SettingsAnalysisDiffTests
 	{
 		private static List<string> Diff(string beforeJson, string afterJson)
 		{
 			var changed = new List<string>();
-			SettingsEditorPane.CollectChangedLeaves(JObject.Parse(beforeJson), JObject.Parse(afterJson), string.Empty, changed);
+			SettingsAnalysis.CollectChangedLeaves(JObject.Parse(beforeJson), JObject.Parse(afterJson), changed);
 			return changed;
 		}
 
