@@ -5,7 +5,7 @@ using UnityEngine;
 namespace Bluecadet.Utils.Editor
 {
 	/// <summary>
-	/// Section of the "Project/Bluecadet" settings pane for editing the simulated
+	/// Contents of the "Tools/Bluecadet/Simulated Args" window: edits the simulated
 	/// command-line args file consumed by <see cref="CommandLineArgs.FromProcess"/>
 	/// while running in the editor.
 	/// </summary>

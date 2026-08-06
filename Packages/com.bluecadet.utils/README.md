@@ -126,18 +126,31 @@ Other members:
 - `LoadedPaths` lists the file tiers that actually loaded; `PathFor(tier)` returns the on-disk
   path for a file tier, or null for `SettingsTier.Cli`, which has no file.
 
-## Project Settings pane
+## Editor windows
 
-**Project Settings > Project > Bluecadet** provides two editor-only tools:
+**Tools > Bluecadet** opens two editor-only, dockable windows:
 
-- **Simulated Command-Line Args** - a text area editing
-  `ProjectSettings/EditorSimulatedArgs.txt` (autosaved on every edit), the file
-  `CommandLineArgs.FromProcess()` reads while running in the editor. A read-only preview shows
-  how the current text parses, so typos are easy to spot.
-- **Settings File Inspector** - enter a settings base name (default `settings`) to see the merged
-  JSON cascade exactly as `AppEnvironment.Current.SettingsFile<T>(baseName)` would build it, with
-  per-path provenance showing which tier (`Base`/`Machine`/`Local`/`Cli`) won. The merged view is
-  read-only. Below it, **Edit Tier** picks one file tier (`Base`/`Machine`/`Local`) and shows that
-  file's raw JSON: **Save** writes exactly what you typed to that tier's file, and **Delete**
-  removes the file (and its `.meta`). Editing one tier at a time means a key you delete really is
-  deleted from that file, and an active `--set` override is never baked into a saved file.
+- **Simulated Args** - a text area editing `ProjectSettings/EditorSimulatedArgs.txt` (autosaved on
+  every edit), the file `CommandLineArgs.FromProcess()` reads while running in the editor. A
+  read-only preview shows how the current text parses, so typos are easy to spot.
+- **Settings** - a typed editor for a settings base name (default `settings`). Tag your settings
+  class with `[SettingsClass]` (or `[SettingsClass("other")]` for a different base name) and the
+  window hydrates it from the merged cascade and draws every field with Unity's own property
+  drawers. Field backgrounds show where the effective value comes from: yellow for an unsaved
+  change, blue for the `Local` tier, green for the `Machine` tier, and gray for a `--set` CLI
+  override, which wins over every file and is therefore read-only in the window. Fields that no
+  file tier persists yet start out marked as unsaved, so newly added settings are easy to spot.
+
+  **Save to Base / Machine / Local** writes only the fields you changed into that tier's file,
+  leaving its other keys alone; saving to `Base` or `Machine` also drops any `Local` override that
+  would shadow the new value, and saving to `Local` skips values that already match `Base`+`Machine`
+  so the file never accumulates redundant overrides. Files that end up empty are deleted.
+  **Revert** re-reads the cascade and drops unsaved edits. Footer foldouts show the merged JSON
+  read-only and every tier file's path, with buttons to reveal it in the file browser or delete it.
+
+  Without a `[SettingsClass]`-tagged class for the current base name, the window falls back to a
+  read-only view listing each dotted path, its merged value, and the tier (`Base`/`Machine`/`Local`/
+  `Cli`) that produced it.
+
+  Known limitation: JSON keys are assumed to match C# field names, so `[JsonProperty]` renames
+  aren't supported, and arrays are treated as single values rather than per-element ones.
