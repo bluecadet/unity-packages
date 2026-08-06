@@ -32,12 +32,32 @@ against `AppEnvironment.DataPath`, which is `StreamingAssets` by default but
 honors `--assetsPath <dir>`. A kiosk install can point everything at a
 writable data folder with a single launch flag; the code never changes.
 
-**Content shape knowledge lives in one mapper.** `SlideMapper` is the only
-place that knows what the CMS exports: it parses `slides/*.json` via
-`ContentJsonFiles.ParseItems`, resolves media paths to absolute, and hashes
-records with `ContentHashing.Hash` so republished-but-identical content
-doesn't diff as changed. It throws on malformed content so a bad version is
-rejected whole.
+**Multiple content models, one manager.** This version carries three record
+types — `Slide`, `Sponsor`, and the singleton `ShowConfig` — all as a shared
+base type, `Record`. `ContentManager<Record>` diffs and swaps them as one
+flat list, one version, one ack. `DemoContentMapper` is the only place that
+knows what the CMS exports: it dispatches per source file (not per parse
+call — merging every file into one `ContentJsonFiles.ParseItems` stream
+would leave nothing to say which model a token came from), routing
+`slides.json` and `sponsors.json` to `ContentJsonFiles.ParseItems`, resolving
+`Slide` image paths to absolute, and hashing every record with
+`ContentHashing.Hash` so republished-but-identical content doesn't diff as
+changed. Ids are namespaced per collection (`"slide:<id>"`, `"sponsor:<id>"`)
+so an id reused across collections can't collide once merged into one list.
+It throws on malformed content — including a missing or duplicated `config`
+singleton — so a bad version is rejected whole. `AppBootstrap` regroups the
+flat list back into typed views (`_slides`, `_sponsors`, `_showConfig`) in
+`OnVersionApplied`, after the diff has already run.
+
+**The `config` singleton.** `config/config.json` is a bare JSON object, not
+a `{"data":[...]}` envelope or array — that's what makes it the singleton:
+`ContentJsonFiles.ParseItems` silently skips object-shaped files, so
+`DemoContentMapper` reads it directly with `JObject.Parse` and emits exactly
+one `ContentItem<Record>` with the fixed id `"config:global"`, hashed via
+`ContentHashing.Hash(JObject, "exportedAt")` to exclude the re-export
+timestamp from change detection. A missing or duplicated singleton throws,
+aborting the version load — the same failure mode as any other malformed
+content.
 
 **Idle-gated hot swap.** Utils' `IdleTimeout` drives Launchpad's `IdleGate`:
 staged versions only apply while nobody is interacting, with
@@ -64,8 +84,9 @@ a precompiled assembly.
 
 Without a controller the app just cold-boots the version named in
 `StreamingAssets/content/manifest.json`. To simulate a new version by hand:
-copy `versions/v001` to `versions/v002`, edit its `slides.json`, point
-`manifest.json` at `v002`, and restart. With a real Launchpad controller
+copy `versions/v001` to `versions/v002`, edit its `slides.json`,
+`sponsors.json`, and/or `config.json`, point `manifest.json` at `v002`, and
+restart. With a real Launchpad controller
 running at `controllerUrl`, promotions arrive over SSE, stage in the
 background (watch the HUD), and swap in once you stop touching the app for
 `idleAfterSeconds` — or immediately via the HUD's "Apply staged now" button.

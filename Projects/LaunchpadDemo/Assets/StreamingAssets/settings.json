@@ -3,7 +3,9 @@
   "consumerId": "launchpad-demo",
   "contentRoot": "content",
   "sourceFolders": [
-    "slides"
+    "slides",
+    "sponsors",
+    "config"
   ],
   "maxSwapDeferSeconds": 300,
   "idleAfterSeconds": 20

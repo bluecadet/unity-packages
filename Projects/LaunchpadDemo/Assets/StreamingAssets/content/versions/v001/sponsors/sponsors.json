@@ -1,0 +1,22 @@
+{
+  "data": [
+    {
+      "id": "aurora-labs",
+      "name": "Aurora Labs",
+      "tier": "platinum",
+      "url": "https://example.com/aurora-labs"
+    },
+    {
+      "id": "harbor-works",
+      "name": "Harbor Works",
+      "tier": "gold",
+      "url": "https://example.com/harbor-works"
+    },
+    {
+      "id": "seed-co",
+      "name": "Seed Co",
+      "tier": "silver",
+      "url": "https://example.com/seed-co"
+    }
+  ]
+}
