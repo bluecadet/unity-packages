@@ -592,7 +592,14 @@ namespace Bluecadet.Hap
                 // Nothing goes to the GPU in the frame the file opened in: D3D12 requires at
                 // least one command-list flush between RenderTexture.Create() and the first blit
                 // that targets it.
-                if (UnityEngine.Time.frameCount == _openedFrame) return false;
+                //
+                // Play mode only, because out of play mode Time.frameCount never advances — it
+                // would hold every upload back forever, leaving preview stuck on an
+                // uninitialized texture while the clock ran on. Preview therefore takes the
+                // hazard rather than the freeze; it is a D3D12 one, and the editor submits its
+                // own frames between the open and any tick that follows.
+                if (Application.isPlaying && UnityEngine.Time.frameCount == _openedFrame)
+                    return false;
 
                 return pipeline.HasPendingFrame;
             }

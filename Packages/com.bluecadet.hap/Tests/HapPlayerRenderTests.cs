@@ -58,6 +58,34 @@ namespace Bluecadet.Hap.Tests
             return HapTestFixtures.Await(Player.OpenAsync(path));
         }
 
+        /// <summary>
+        /// Tick until the render count stops moving, and answer where it settled.
+        ///
+        /// Opening leaves a decoded frame waiting that no tick has uploaded yet, and the tick
+        /// that does upload it shows a new texture — a legitimate render, not repeated work. So
+        /// "steady state" only begins once that has happened, and a baseline taken any earlier
+        /// is really measuring the tail of the open.
+        /// </summary>
+        int TickUntilSettled()
+        {
+            // A run of quiet ticks, not one: the frame waiting at open lands a tick or two after
+            // the open itself reports done, and a single unchanged tick happens before that.
+            const int quietTicks = 5;
+
+            int quiet = 0;
+            Assert.That(HapTestFixtures.PollUntil(
+                    () => quiet >= quietTicks,
+                    () =>
+                    {
+                        int before = Player.RenderWorkCount;
+                        HapMainLoop.Tick(0f);
+                        quiet = Player.RenderWorkCount == before ? quiet + 1 : 0;
+                    }),
+                Is.True, "the render count never stopped moving");
+
+            return Player.RenderWorkCount;
+        }
+
         [Test]
         public void RenderTexture_TickThatOpensTheFile_RendersTheInitialFrame()
         {
@@ -80,8 +108,7 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            HapMainLoop.Tick(0f);
-            int baseline = Player.RenderWorkCount;
+            int baseline = TickUntilSettled();
             Assert.That(baseline, Is.GreaterThan(0));
 
             // Not playing, nothing decoded, nothing reassigned: this tick has nothing new to show.
@@ -93,10 +120,12 @@ namespace Bluecadet.Hap.Tests
         }
 
         /// <summary>
-        /// A UnityTest, not a plain Test: nothing is uploaded in the same engine frame a file
-        /// opened in (the D3D12 command-list-flush workaround), and a synchronous Test never
-        /// leaves that frame. Yielding lets real frames elapse so a genuinely new decoded frame
-        /// can reach <see cref="HapPlayer.RenderWorkCount"/>.
+        /// A UnityTest, not a plain Test: the frame this waits for has to be decoded off the main
+        /// thread first, and yielding is what gives that thread wall-clock time to produce it.
+        ///
+        /// The baseline is taken from a settled state on purpose — the frame waiting at open
+        /// would otherwise satisfy this on its own, and the test would pass without a single new
+        /// frame ever being decoded.
         /// </summary>
         [UnityTest]
         public IEnumerator RenderTexture_NewFrameUploaded_EventuallyRenders()
@@ -105,8 +134,7 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            HapMainLoop.Tick(0f);
-            int baseline = Player.RenderWorkCount;
+            int baseline = TickUntilSettled();
 
             Player.Play();
 
@@ -130,8 +158,7 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderTexture = MakeTarget();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            HapMainLoop.Tick(0f);
-            int baseline = Player.RenderWorkCount;
+            int baseline = TickUntilSettled();
 
             // Steady state first: confirm nothing renders again before the reassignment.
             HapMainLoop.Tick(0f);
@@ -162,8 +189,7 @@ namespace Bluecadet.Hap.Tests
             Player.TargetRenderer = MakeRenderer();
             Assert.That(Open(HapTestFixtures.Hap1).Success, Is.True);
 
-            HapMainLoop.Tick(0f);
-            int baseline = Player.RenderWorkCount;
+            int baseline = TickUntilSettled();
             Assert.That(baseline, Is.GreaterThan(0));
 
             HapMainLoop.Tick(0f);
