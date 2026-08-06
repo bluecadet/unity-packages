@@ -3,6 +3,7 @@
     "rootNamespace": "Bluecadet.Utils.Tests",
     "references": [
         "Bluecadet.Utils",
+        "Bluecadet.Utils.Editor",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],
