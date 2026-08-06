@@ -7,9 +7,14 @@ namespace Bluecadet.Hap.Tests
 {
     /// <summary>
     /// Empirical verification of the assumption the zero-copy upload path is built on:
-    /// a readable <see cref="Texture2D"/>'s raw data pointer stays put across
-    /// <see cref="Texture2D.Apply"/> calls, and bytes written through that cached pointer
-    /// are what the GPU samples after the next Apply.
+    /// a raw data pointer read once, before the first <see cref="Texture2D.Apply"/>, keeps
+    /// naming the buffer the GPU samples for the life of the texture — so the decode thread
+    /// can write straight into it and the main thread only has to Apply.
+    ///
+    /// What does *not* hold is pointer identity across a re-query: asking a texture for its
+    /// raw data again after an Apply hands back a different buffer and retires the old one
+    /// (see <see cref="Requery_AfterApply_RetiresTheCachedPointer"/>). That is why
+    /// HapTextureRing reads each texture's pointer exactly once, at construction.
     ///
     /// If these tests ever fail, the decode thread must go back to writing into its own
     /// buffers and the main thread must copy with LoadRawTextureData.
@@ -25,6 +30,7 @@ namespace Bluecadet.Hap.Tests
 
         const ushort Red565 = 0xF800;
         const ushort Green565 = 0x07E0;
+        const ushort Blue565 = 0x001F;
 
         static unsafe IntPtr RawPtr(Texture2D t) => (IntPtr)t.GetRawTextureData<byte>().GetUnsafePtr();
 
@@ -78,23 +84,79 @@ namespace Bluecadet.Hap.Tests
             new(Width, Height, TextureFormat.DXT1, mipChain: false, linear: false,
                 createUninitialized: createUninitialized);
 
+        /// <summary>
+        /// The ring's exact pattern: read the pointer once at construction, then write through
+        /// it for every frame. Each Apply must upload what was just written through that one
+        /// cached pointer, however many frames go by.
+        /// </summary>
         [TestCase(false)]
         [TestCase(true)]
-        public void GetRawTextureData_Pointer_IsStableAcrossApply(bool createUninitialized)
+        public void CachedPointer_StaysAuthoritative_AcrossApplies(bool createUninitialized)
         {
+            Assume.That(SystemInfo.graphicsDeviceType, Is.Not.EqualTo(UnityEngine.Rendering.GraphicsDeviceType.Null),
+                "needs a graphics device");
+
             var tex = MakeTexture(createUninitialized);
             try
             {
-                IntPtr first = RawPtr(tex);
-                Assert.That(first, Is.Not.EqualTo(IntPtr.Zero));
+                IntPtr cached = RawPtr(tex);
+                Assert.That(cached, Is.Not.EqualTo(IntPtr.Zero));
 
-                for (int i = 0; i < 5; i++)
+                for (int i = 0; i < 6; i++)
                 {
-                    FillSolidDxt1(first, Dxt1Size, i % 2 == 0 ? Red565 : Green565);
+                    bool wantRed = i % 2 == 0;
+                    FillSolidDxt1(cached, Dxt1Size, wantRed ? Red565 : Green565);
                     tex.Apply(false, false);
-                    Assert.That(RawPtr(tex), Is.EqualTo(first),
-                        $"raw data pointer moved after Apply #{i + 1}");
+
+                    Color got = ReadBackCenterPixel(tex);
+                    Assert.That(wantRed ? got.r : got.g, Is.GreaterThan(0.5f),
+                        $"frame {i}: writes through the cached pointer stopped reaching the GPU");
+                    Assert.That(wantRed ? got.g : got.r, Is.LessThan(0.5f),
+                        $"frame {i}: wrong colour on screen");
                 }
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(tex);
+            }
+        }
+
+        /// <summary>
+        /// The trap this design avoids: re-reading a texture's raw data after an Apply can hand
+        /// back a different buffer, and it is that newest buffer Apply uploads — writes through
+        /// the previously cached pointer are silently dropped. Anything caching a pointer must
+        /// therefore never ask the texture for its raw data again.
+        /// </summary>
+        [Test]
+        public void Requery_AfterApply_RetiresTheCachedPointer()
+        {
+            Assume.That(SystemInfo.graphicsDeviceType, Is.Not.EqualTo(UnityEngine.Rendering.GraphicsDeviceType.Null),
+                "needs a graphics device");
+
+            var tex = MakeTexture(true);
+            try
+            {
+                IntPtr cached = RawPtr(tex);
+                FillSolidDxt1(cached, Dxt1Size, Red565);
+                tex.Apply(false, false);
+
+                // Nothing samples the texture in between, which is when Unity re-materialises it.
+                IntPtr requeried = RawPtr(tex);
+
+                FillSolidDxt1(cached, Dxt1Size, Green565);
+                if (requeried != cached)
+                    FillSolidDxt1(requeried, Dxt1Size, Blue565);
+
+                tex.Apply(false, false);
+                Color got = ReadBackCenterPixel(tex);
+
+                if (requeried != cached)
+                    Assert.That(got.b, Is.GreaterThan(0.5f),
+                        "expected the re-queried buffer to win; if the cached one still wins, " +
+                        "the pointer moved but stayed live and this test's premise is wrong");
+                else
+                    Assert.That(got.g, Is.GreaterThan(0.5f),
+                        "pointer did not move, so the cached buffer must still be the live one");
             }
             finally
             {

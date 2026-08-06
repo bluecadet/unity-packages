@@ -15,9 +15,11 @@ namespace Bluecadet.Hap
     /// main thread only has to call <see cref="Texture2D.Apply(bool, bool)"/> on the committed
     /// slot. There is no staging buffer and no memcpy between decode and upload.
     ///
-    /// Pointer stability across Apply — the assumption this rests on — is verified empirically
-    /// by the TextureZeroCopyTests suite. If it ever stops holding, this class is the single
-    /// place to fall back to per-slot NativeArrays plus LoadRawTextureData.
+    /// A pointer read once, before the first Apply, keeps naming the buffer the GPU samples —
+    /// the assumption this rests on, verified empirically by the TextureZeroCopyTests suite.
+    /// Note it is reading the pointer *again* that breaks it, not Apply itself. If it ever
+    /// stops holding, this class is the single place to fall back to per-slot NativeArrays
+    /// plus LoadRawTextureData.
     ///
     /// Threading: construction, <see cref="TryAcquire"/>, <see cref="MarkUploaded"/> and
     /// <see cref="Dispose"/> are main-thread only; <see cref="BeginWrite"/>,
@@ -103,6 +105,9 @@ namespace Bluecadet.Hap
 
                     _textures[s][t] = tex;
 
+                    // Read once, here, and never again: asking a texture for its raw data after
+                    // an Apply can hand back a fresh buffer and retire this one, at which point
+                    // the decode thread would be writing where nothing uploads from.
                     var raw = tex.GetRawTextureData<byte>();
                     unsafe { _pointers[s][t] = (IntPtr)raw.GetUnsafePtr(); }
 
