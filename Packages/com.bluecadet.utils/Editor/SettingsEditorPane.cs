@@ -28,6 +28,7 @@ namespace Bluecadet.Utils.Editor
 		/// <summary>Descriptive stand-in shown for <see cref="SettingsTier.Cli"/>, which has no backing file.</summary>
 		private const string _cliTierLabel = "(--set command-line arguments)";
 
+		private static readonly Color _errorTint = new Color(1f, 0.55f, 0.55f, 1f);
 		private static readonly Color _dirtyTint = new Color(1f, 0.9f, 0.6f, 1f);
 		private static readonly Color _localTint = new Color(0.5f, 0.85f, 1f, 1f);
 		private static readonly Color _machineTint = new Color(0.6f, 1f, 0.7f, 1f);
@@ -58,6 +59,12 @@ namespace Bluecadet.Utils.Editor
 		private bool _pendingReload;
 		private readonly List<(string Path, JToken Value, SettingsTier? Tier)> _provenance = new();
 		private readonly HashSet<SettingsTier> _activeTiers = new();
+
+		/// <summary>Errors the drawn instance's <see cref="ISettingsValidator"/>s reported, rebuilt on every hydration and edit.</summary>
+		private readonly List<SettingsValidationError> _validationErrors = new();
+
+		/// <summary>The dotted paths in <see cref="_validationErrors"/>, for tinting lookups.</summary>
+		private readonly HashSet<string> _validationErrorPaths = new();
 
 		/// <summary>Throwaway host object that gives the settings instance a <see cref="SerializedObject"/> to draw through.</summary>
 		private sealed class SettingsWrapper : ScriptableObject
@@ -207,16 +214,18 @@ namespace Bluecadet.Utils.Editor
 
 				JObject after = _instance != null ? JObject.FromObject(_instance, SettingsJson.Serializer) : new JObject();
 				var changedPaths = new List<string>();
-				CollectChangedLeaves(before, after, string.Empty, changedPaths);
+				SettingsAnalysis.CollectChangedLeaves(before, after, changedPaths);
 				foreach (string path in changedPaths)
 					MarkDirty(path);
 
 				CaptureEdits();
+				RunValidation();
 			}
 
 			DrawLegend();
 
 			EditorGUILayout.Space(4);
+			DrawValidationErrors();
 			DrawSaveButtons();
 		}
 
@@ -251,7 +260,7 @@ namespace Bluecadet.Utils.Editor
 			SettingsTier? tier = _cascade.TierFor(jsonPath);
 			bool isDirty = IsDirty(jsonPath);
 
-			if (TryGetTint(isDirty, tier, out Color tint))
+			if (TryGetTint(HasError(jsonPath), isDirty, tier, out Color tint))
 				GUI.backgroundColor = tint;
 
 			using (new EditorGUI.DisabledScope(tier == SettingsTier.Cli))
@@ -283,11 +292,17 @@ namespace Bluecadet.Utils.Editor
 
 		private void DrawLegend()
 		{
-			if (_dirtyPaths.Count == 0 && _activeTiers.Count == 0)
+			if (_dirtyPaths.Count == 0 && _activeTiers.Count == 0 && _validationErrors.Count == 0)
 				return;
 
 			EditorGUILayout.Space(2);
 			Color previousBackground = GUI.backgroundColor;
+
+			if (_validationErrors.Count > 0)
+			{
+				GUI.backgroundColor = _errorTint;
+				EditorGUILayout.HelpBox("Red = failed validation", MessageType.None);
+			}
 
 			if (_dirtyPaths.Count > 0)
 			{
@@ -314,6 +329,19 @@ namespace Bluecadet.Utils.Editor
 			}
 
 			GUI.backgroundColor = previousBackground;
+		}
+
+		/// <summary>Lists every reported validation error above the save buttons, one <c>"path: message"</c> per line.</summary>
+		private void DrawValidationErrors()
+		{
+			if (_validationErrors.Count == 0)
+				return;
+
+			var lines = new string[_validationErrors.Count];
+			for (int i = 0; i < _validationErrors.Count; i++)
+				lines[i] = _validationErrors[i].ToString();
+
+			EditorGUILayout.HelpBox(string.Join("\n", lines), MessageType.Error);
 		}
 
 		private void DrawSaveButtons()
@@ -422,23 +450,24 @@ namespace Bluecadet.Utils.Editor
 		{
 			_provenance.Clear();
 			_activeTiers.Clear();
-			CollectProvenance(_cascade.Merged, string.Empty);
+			CollectProvenance(_cascade.Merged, SettingsPath.Root);
 		}
 
-		private void CollectProvenance(JObject obj, string prefix)
+		private void CollectProvenance(JObject obj, SettingsPath prefix)
 		{
 			foreach (JProperty property in obj.Properties())
 			{
-				string path = string.IsNullOrEmpty(prefix) ? property.Name : $"{prefix}.{property.Name}";
+				SettingsPath path = prefix.Append(property.Name);
 
-				if (property.Value is JObject child && child.HasValues)
+				if (!SettingsPath.IsLeaf(property.Value))
 				{
-					CollectProvenance(child, path);
+					CollectProvenance((JObject)property.Value, path);
 					continue;
 				}
 
-				SettingsTier? tier = _cascade.TierFor(path);
-				_provenance.Add((path, property.Value, tier));
+				string dottedPath = path.ToString();
+				SettingsTier? tier = _cascade.TierFor(dottedPath);
+				_provenance.Add((dottedPath, property.Value, tier));
 
 				if (tier.HasValue)
 					_activeTiers.Add(tier.Value);
@@ -512,6 +541,23 @@ namespace Bluecadet.Utils.Editor
 
 			_wrapper.settings = _instance;
 			_wrapperObject = new SerializedObject(_wrapper);
+
+			RunValidation();
+		}
+
+		/// <summary>Re-runs every <see cref="ISettingsValidator"/> in the drawn instance and caches what they reported.</summary>
+		private void RunValidation()
+		{
+			_validationErrors.Clear();
+			_validationErrorPaths.Clear();
+
+			if (_instance == null)
+				return;
+
+			_validationErrors.AddRange(SettingsAnalysis.CollectValidationErrors(_instance));
+
+			foreach (SettingsValidationError error in _validationErrors)
+				_validationErrorPaths.Add(error.Path);
 		}
 
 		/// <summary>Serializes the edited instance so it can be restored after a domain reload.</summary>
@@ -545,7 +591,7 @@ namespace Bluecadet.Utils.Editor
 			var defaultPaths = new HashSet<string>();
 			try
 			{
-				FlattenPaths(JObject.FromObject(defaults, SettingsJson.Serializer), string.Empty, defaultPaths);
+				SettingsAnalysis.FlattenPaths(JObject.FromObject(defaults, SettingsJson.Serializer), defaultPaths);
 			}
 			catch (Exception ex)
 			{
@@ -562,7 +608,7 @@ namespace Bluecadet.Utils.Editor
 
 				try
 				{
-					FlattenPaths(JObject.Parse(File.ReadAllText(path)), string.Empty, persistedPaths);
+					SettingsAnalysis.FlattenPaths(JObject.Parse(File.ReadAllText(path)), persistedPaths);
 				}
 				catch
 				{
@@ -594,6 +640,9 @@ namespace Bluecadet.Utils.Editor
 
 		private void Save(SettingsTier tier)
 		{
+			if (!ConfirmSavingWithErrors(tier))
+				return;
+
 			try
 			{
 				var fullValue = (JObject)JToken.FromObject(_instance, SettingsJson.Serializer);
@@ -646,6 +695,27 @@ namespace Bluecadet.Utils.Editor
 			Reload(keepEdits: false);
 		}
 
+		/// <summary>
+		/// Asks before writing settings that failed validation; always true when nothing is reported.
+		/// Invalid values are still savable on purpose: a validator may be stricter than the app, and
+		/// half-finished settings are often worth persisting anyway.
+		/// </summary>
+		private bool ConfirmSavingWithErrors(SettingsTier tier)
+		{
+			if (_validationErrors.Count == 0)
+				return true;
+
+			var lines = new string[_validationErrors.Count];
+			for (int i = 0; i < _validationErrors.Count; i++)
+				lines[i] = _validationErrors[i].ToString();
+
+			return EditorUtility.DisplayDialog(
+				"Save settings that failed validation?",
+				$"{string.Join("\n", lines)}\n\nSave to the {tier} tier anyway?",
+				"Save Anyway",
+				"Cancel");
+		}
+
 		/// <summary>Asks before throwing away in-progress edits; always true when there are none.</summary>
 		private bool ConfirmDiscardingEdits(string reason)
 		{
@@ -659,14 +729,22 @@ namespace Bluecadet.Utils.Editor
 
 		private bool IsDirty(string jsonPath) => _dirtyPaths.Contains(jsonPath);
 
+		private bool HasError(string jsonPath) => _validationErrorPaths.Contains(jsonPath);
+
 		private void MarkDirty(string jsonPath)
 		{
 			if (!_dirtyPaths.Contains(jsonPath))
 				_dirtyPaths.Add(jsonPath);
 		}
 
-		private bool TryGetTint(bool isDirty, SettingsTier? tier, out Color tint)
+		private bool TryGetTint(bool hasError, bool isDirty, SettingsTier? tier, out Color tint)
 		{
+			if (hasError)
+			{
+				tint = _errorTint;
+				return true;
+			}
+
 			if (isDirty)
 			{
 				tint = _dirtyTint;
@@ -694,6 +772,15 @@ namespace Bluecadet.Utils.Editor
 		private bool TryGetContainerTint(string jsonPath, out Color tint)
 		{
 			string prefix = jsonPath + ".";
+
+			foreach (string errorPath in _validationErrorPaths)
+			{
+				if (errorPath == jsonPath || errorPath.StartsWith(prefix, StringComparison.Ordinal))
+				{
+					tint = _errorTint;
+					return true;
+				}
+			}
 
 			foreach (string dirtyPath in _dirtyPaths)
 			{
@@ -745,45 +832,6 @@ namespace Bluecadet.Utils.Editor
 		{
 			const string prefix = _wrapperFieldName + ".";
 			return propertyPath.StartsWith(prefix, StringComparison.Ordinal) ? propertyPath.Substring(prefix.Length) : propertyPath;
-		}
-
-		/// <summary>Collects every dotted leaf path in <paramref name="obj"/>; arrays count as leaves.</summary>
-		private static void FlattenPaths(JObject obj, string prefix, HashSet<string> paths)
-		{
-			foreach (JProperty property in obj.Properties())
-			{
-				string path = string.IsNullOrEmpty(prefix) ? property.Name : $"{prefix}.{property.Name}";
-
-				if (property.Value is JObject child && child.HasValues)
-					FlattenPaths(child, path, paths);
-				else
-					paths.Add(path);
-			}
-		}
-
-		/// <summary>
-		/// Walks <paramref name="after"/> and adds the dotted path of every leaf (arrays count as leaves,
-		/// same as <see cref="FlattenPaths"/>) whose value differs from the corresponding leaf in
-		/// <paramref name="before"/> to <paramref name="changed"/>. A leaf missing from <paramref name="before"/>
-		/// counts as changed. Internal (rather than private) so it's testable without a GUI: it's pure JSON
-		/// diffing, unrelated to how <see cref="DrawTypedEditor"/> gathers the before/after snapshots.
-		/// </summary>
-		internal static void CollectChangedLeaves(JObject before, JObject after, string prefix, List<string> changed)
-		{
-			foreach (JProperty property in after.Properties())
-			{
-				string path = string.IsNullOrEmpty(prefix) ? property.Name : $"{prefix}.{property.Name}";
-				JToken beforeValue = before?[property.Name];
-
-				if (property.Value is JObject child && child.HasValues)
-				{
-					CollectChangedLeaves(beforeValue as JObject ?? new JObject(), child, path, changed);
-					continue;
-				}
-
-				if (!JToken.DeepEquals(beforeValue, property.Value))
-					changed.Add(path);
-			}
 		}
 	}
 }

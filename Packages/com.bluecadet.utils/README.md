@@ -22,7 +22,7 @@ Or add the scoped registry manually to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "com.bluecadet.utils": "0.1.6"
+    "com.bluecadet.utils": "1.2.0"
   }
 }
 ```
@@ -32,7 +32,7 @@ Or add the scoped registry manually to `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.bluecadet.utils": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.utils#utils/v0.1.6"
+    "com.bluecadet.utils": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.utils#utils/v1.2.0"
   }
 }
 ```
@@ -60,6 +60,11 @@ exactly as you would type arguments on the command line (e.g. `--env=staging --p
 a missing file is treated as no arguments. Quoted tokens (`--name="Blue Cadet"`) are honored via
 `CommandLineArgs.ParseText`.
 
+`Parse(params string[] argv)` parses an explicit argv array directly, without going through
+`FromProcess()` or `ParseText`'s tokenizer — handy in tests. `All` exposes every parsed argument as
+a read-only `name → value` dictionary (keyed the same normalized way as `Get`/`TryGet`/`HasFlag`),
+for callers that want to enumerate rather than look up one name at a time.
+
 ## AppEnvironment
 
 Immutable snapshot of the runtime environment: data directory, machine identity, and parsed
@@ -73,6 +78,7 @@ AppEnvironment env = AppEnvironment.Current;
 string dataPath = env.DataPath;   // --assetsPath, else Application.streamingAssetsPath
 string machineId = env.MachineId; // --machineId, else Environment.MachineName
 string absolute = env.ResolvePath("some/relative/file.json");
+CommandLineArgs args = env.Args;  // the parsed args this environment was built from
 ```
 
 In tests, build an isolated environment instead of touching `Current`:
@@ -126,6 +132,38 @@ Other members:
 - `LoadedPaths` lists the file tiers that actually loaded; `PathFor(tier)` returns the on-disk
   path for a file tier, or null for `SettingsTier.Cli`, which has no file.
 
+## Settings validation
+
+Implement `ISettingsValidator` on a settings class, or on any object nested inside one, to report
+values that are missing or out of range. Paths are relative to the validating object, so a nested
+class validates its own fields without knowing where it sits:
+
+```csharp
+public class AppSettings : ISettingsValidator
+{
+    public string controllerUrl = "http://127.0.0.1:8710";
+
+    public void Validate(SettingsValidationErrors errors)
+    {
+        if (!Uri.TryCreate(controllerUrl, UriKind.Absolute, out _))
+            errors.Add(nameof(controllerUrl), "Must be an absolute http(s) URL.");
+    }
+}
+```
+
+`errors.Add(path, message)` builds a `SettingsValidationError` — a `Path`/`Message` pair whose
+`ToString()` renders as `"path: message"` (or just the message when the path is empty) — and
+appends it to `SettingsValidationErrors.Errors`, the read-only list the editor renders from.
+
+Validation is editor-only: the **Settings** window runs it on load and after every edit, and
+`SettingsFile<T>` never calls it, so a build always boots with whatever the files say. Errors from
+an object inside a list or array are reported against the list field itself, since the editor
+treats arrays as single values.
+
+Known limitation: the walk that finds validators does not descend into structs (Unity's math types
+expose computed properties that hand back more of themselves), so a validator nested inside a
+struct is never called — a struct that implements `ISettingsValidator` itself still is.
+
 ## Editor windows
 
 **Tools > Bluecadet** opens two editor-only, dockable windows:
@@ -140,6 +178,8 @@ Other members:
   change, blue for the `Local` tier, green for the `Machine` tier, and gray for a `--set` CLI
   override, which wins over every file and is therefore read-only in the window. Fields that no
   file tier persists yet start out marked as unsaved, so newly added settings are easy to spot.
+  Fields an `ISettingsValidator` complains about turn red (red wins over every other color) and
+  every message is listed above the save buttons; saving anyway is allowed after a confirmation.
 
   **Save to Base / Machine / Local** writes only the fields you changed into that tier's file,
   leaving its other keys alone; saving to `Base` or `Machine` also drops any `Local` override that
