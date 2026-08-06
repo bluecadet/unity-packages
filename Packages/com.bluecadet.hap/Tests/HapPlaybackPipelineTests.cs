@@ -38,7 +38,7 @@ namespace Bluecadet.Hap.Tests
         static void Wait() => Thread.Sleep(1);
 
         /// <summary>Opens a fixture and starts its decode thread, or skips the test.</summary>
-        void StartPlayback(string path)
+        void StartPlayback(string path, int firstFrame = 0)
         {
             HapTestFixtures.Require(path);
 
@@ -52,7 +52,7 @@ namespace Bluecadet.Hap.Tests
 
             _pipeline = new HapOutputPipeline(_session.Width, _session.Height, _session.Textures, RetireDepth);
             Assert.That(_pipeline.IsValid, Is.True);
-            _session.StartDecoding(_pipeline.DecodeTarget, 0);
+            _session.StartDecoding(_pipeline.DecodeTarget, firstFrame);
         }
 
         /// <summary>Pumps the main-thread side until a frame has been presented.</summary>
@@ -115,6 +115,26 @@ namespace Bluecadet.Hap.Tests
             }, Wait);
 
             Assert.That(presented, Is.GreaterThanOrEqualTo(10), "playback stalled");
+        }
+
+        [Test]
+        public void Playback_StartedAtAFrame_DecodesThatOneFirst()
+        {
+            const int FirstFrame = 7;
+
+            // What a player opening at a timecode asks for: nothing decodes frame 0 on the way,
+            // so nothing can present it before the frame the caller actually wanted.
+            StartPlayback(HapTestFixtures.Hap1, FirstFrame);
+
+            int decoded = -1;
+            Assert.That(HapTestFixtures.PollUntil(
+                () => _pipeline.DecodeTarget.TryPeekFrame(out decoded), Wait), Is.True,
+                "nothing was decoded");
+
+            // The peek can catch the one prefetched frame that follows the request rather than
+            // the request itself; both mean decoding began where it was asked to.
+            Assert.That(decoded, Is.InRange(FirstFrame, FirstFrame + 1),
+                "decoding did not start on the requested frame");
         }
 
         [Test]

@@ -436,5 +436,96 @@ namespace Bluecadet.Hap.Tests
                 "the close never settled");
             Assert.That(Player.IsOpen, Is.False);
         }
+
+        // ── Seeking across an open ───────────────────────────────────────────
+
+        /// <summary>
+        /// Open a fixture and hand back its duration, so a test can pick a seek target before
+        /// the open it is actually about has anything to report.
+        /// </summary>
+        float DurationOf(string path)
+        {
+            HapTestFixtures.Require(path);
+            Assert.That(HapTestFixtures.Await(Player.OpenAsync(path)).Success, Is.True);
+            return Player.Duration;
+        }
+
+        [Test]
+        public void Time_SetWhileOpening_StartsThereRatherThanAtTheTop()
+        {
+            float target = DurationOf(HapTestFixtures.Hap1) * 0.5f;
+
+            var open = Player.OpenAsync(HapTestFixtures.Hap1);
+            Player.Time = target;   // the file is not open yet: the caller asked for a start time
+
+            Assert.That(HapTestFixtures.Await(open).Success, Is.True);
+            Assert.That(Player.Time, Is.EqualTo(target).Within(0.001f),
+                "the seek made during the open was thrown away");
+        }
+
+        [Test]
+        public void Time_SetWhileOpening_ReadsBackBeforeTheFileArrives()
+        {
+            HapTestFixtures.Require(HapTestFixtures.Hap1);
+
+            var open = Player.OpenAsync(HapTestFixtures.Hap1);
+            Player.Time = 1.25f;
+
+            Assert.That(Player.IsOpen, Is.False);
+            Assert.That(Player.Time, Is.EqualTo(1.25f).Within(0.001f));
+
+            HapTestFixtures.Await(open);
+        }
+
+        [Test]
+        public void Time_SetWhileOpeningBeyondTheEnd_ClampsOnceTheDurationIsKnown()
+        {
+            HapTestFixtures.Require(HapTestFixtures.Hap1);
+
+            var open = Player.OpenAsync(HapTestFixtures.Hap1);
+            Player.Time = 10_000f;
+
+            Assert.That(HapTestFixtures.Await(open).Success, Is.True);
+            Assert.That(Player.Time, Is.EqualTo(Player.Duration).Within(0.001f));
+        }
+
+        [Test]
+        public void Time_SetBeforeAnOpen_DoesNotCarryIntoTheNextFile()
+        {
+            float target = DurationOf(HapTestFixtures.Hap1) * 0.5f;
+            Player.Time = target;
+
+            // Asked for after the seek, so the new file is the caller's file from the top.
+            Assert.That(HapTestFixtures.Await(Player.OpenAsync(HapTestFixtures.Hap1)).Success, Is.True);
+            Assert.That(Player.Time, Is.EqualTo(0f).Within(0.001f));
+        }
+
+        [Test]
+        public void Stop_WhileOpening_DropsTheSeekWaitingOnTheOpen()
+        {
+            float target = DurationOf(HapTestFixtures.Hap1) * 0.5f;
+
+            var open = Player.OpenAsync(HapTestFixtures.Hap1);
+            Player.Time = target;
+            Player.Stop();
+
+            Assert.That(HapTestFixtures.Await(open).Success, Is.True);
+            Assert.That(Player.Time, Is.EqualTo(0f).Within(0.001f));
+        }
+
+        [Test]
+        public void Play_QueuedBehindAnOpenWithASeek_StartsFromTheSeek()
+        {
+            float target = DurationOf(HapTestFixtures.Hap1) * 0.5f;
+
+            var open = Player.OpenAsync(HapTestFixtures.Hap1);
+            Player.Time = target;
+            Player.Play();
+
+            Assert.That(HapTestFixtures.Await(open).Success, Is.True);
+            Assert.That(Player.IsPlaying, Is.True);
+            Assert.That(Player.Time, Is.GreaterThanOrEqualTo(target),
+                "playback started from somewhere other than the seek");
+        }
     }
 }
