@@ -101,7 +101,8 @@ InitTestScene*.unity*
 !Native~
 !Tests~
 
-/Projects
+/Projects/*
+!/Projects/LaunchpadDemo
 
 !Packages/*/Plugins/**/*.dll
 !Packages/*/Plugins/**/*.bundle

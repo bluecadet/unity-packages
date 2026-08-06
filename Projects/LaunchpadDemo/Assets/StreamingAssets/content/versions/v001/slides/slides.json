@@ -1,0 +1,22 @@
+{
+  "data": [
+    {
+      "id": "welcome",
+      "title": "Welcome",
+      "body": "Seed content loaded from StreamingAssets/content on cold boot.",
+      "image": "images/aurora.png"
+    },
+    {
+      "id": "how-it-works",
+      "title": "How it works",
+      "body": "Promoted versions stage in the background and swap in while the app is idle.",
+      "image": "images/harbor.png"
+    },
+    {
+      "id": "no-image",
+      "title": "Optional media",
+      "body": "Slides without an image preload nothing.",
+      "image": ""
+    }
+  ]
+}

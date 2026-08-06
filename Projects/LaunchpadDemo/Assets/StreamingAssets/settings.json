@@ -1,0 +1,10 @@
+{
+  "controllerUrl": "http://127.0.0.1:8710",
+  "consumerId": "launchpad-demo",
+  "contentRoot": "content",
+  "sourceFolders": [
+    "slides"
+  ],
+  "maxSwapDeferSeconds": 300,
+  "idleAfterSeconds": 20
+}

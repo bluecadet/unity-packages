@@ -1,0 +1,17 @@
+{
+    "name": "LaunchpadDemo",
+    "rootNamespace": "LaunchpadDemo",
+    "references": [
+        "Bluecadet.Launchpad",
+        "Bluecadet.Utils"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
