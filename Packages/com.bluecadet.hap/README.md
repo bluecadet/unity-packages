@@ -118,6 +118,24 @@ destroying the component completes any pending awaits with
 `HapOpenStatus.Cancelled`. Open and close are main-thread-only calls and
 always complete on the main thread.
 
+### Opening at a timecode
+
+Set `Time` right after asking for the file — you do not have to wait for the
+open, and there is no need to seek from an `Opened` handler:
+
+```csharp
+player.Open(path);
+player.Time = 12.5f;   // where the video starts, not a seek once it is running
+player.Play();
+```
+
+The seek is held until the file arrives, then clamped to its duration and used
+as the first frame decoded — so the video appears at that timecode rather than
+showing frame 0 first. Reading `Time` back before the file is open returns what
+was asked for. `Open`/`OpenAsync` clear a seek made before the call, so a
+timecode meant for one video is never inherited by the next; `Stop()` clears one
+too. Seeks made after the open lands behave as they always have.
+
 `HapOpenStatus` values: `Success`, `Superseded`, `Cancelled`, `InvalidPath`,
 `FileNotFound`, `FileUnreadable`, `NotAVideoFile`, `NoHapTrack`,
 `UnsupportedFormat`, `CorruptVideo`, `OutOfMemory`, `GpuSetupFailed`.
@@ -132,7 +150,7 @@ public bool IsOpening { get; }
 public bool IsClosing { get; }
 public int FrameCount { get; }
 public float Duration { get; }
-public float Time { get; set; }      // seek by setting
+public float Time { get; set; }      // seek by setting, before the open lands or after
 public float FrameRate { get; }
 public int Width { get; }
 public int Height { get; }

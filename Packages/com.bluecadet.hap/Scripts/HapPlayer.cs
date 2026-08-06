@@ -83,8 +83,9 @@ namespace Bluecadet.Hap
 
                 _lifecycle = new HapLifecycle();
                 _lifecycle.PathAdopted += path => filePath = path;
-                _lifecycle.Closing += StopPlayback;
+                _lifecycle.Closing += HandleClosing;
                 _lifecycle.Opened += HandleOpened;
+                _lifecycle.StartFrame = TakeStartFrame;
                 return _lifecycle;
             }
         }
@@ -95,6 +96,15 @@ namespace Bluecadet.Hap
         bool _playing;
         bool _pendingPlay;
         int _openedFrame = -1;
+
+        /// <summary>
+        /// A seek asked for while no file was open yet, in seconds, or null for none. The clock
+        /// cannot take it at the time: the duration to clamp it against and the frame rate to
+        /// turn it into a frame both arrive with the file. So it waits here and is spent as that
+        /// file starts decoding — see <see cref="TakeStartFrame"/>, which is also why opening no
+        /// longer resets a caller's seek back to the top.
+        /// </summary>
+        float? _pendingSeekTime;
 
         /// <summary>
         /// Where this player sits in <see cref="HapMainLoop"/>'s list, or -1 when it is not
@@ -261,12 +271,24 @@ namespace Bluecadet.Hap
 
         /// <summary>
         /// Current playback time in seconds. Setting this seeks to that time.
+        ///
+        /// Seeking is allowed before the file is open — during an <see cref="Open(string)"/> in
+        /// flight, or ahead of one — and the video then starts on that time rather than at the
+        /// top. The seek is held as asked and clamped to the duration once the file supplies one,
+        /// which is what this reads back in the meantime. Opening a file clears a seek made
+        /// before the call, so a stale one cannot be inherited by the next video.
         /// </summary>
         public float Time
         {
-            get => _playbackClock.Time;
+            get => _pendingSeekTime ?? _playbackClock.Time;
             set
             {
+                if (!IsOpen)
+                {
+                    _pendingSeekTime = value;
+                    return;
+                }
+
                 _playbackClock.Time = Mathf.Clamp(value, 0f, Duration);
                 SeekDecodeToClock();
             }
@@ -373,8 +395,10 @@ namespace Bluecadet.Hap
         public void Stop()
         {
             StopPlayback();
-            _playbackClock.Time = 0f;
-            SeekDecodeToClock();
+
+            // Through the seek path, so this also discards a seek waiting on an open in flight —
+            // that file is meant to start at the top now.
+            Time = 0f;
         }
 
         // ── Lifecycle plumbing ───────────────────────────────────────────────
@@ -435,10 +459,37 @@ namespace Bluecadet.Hap
             _playing = false;
         }
 
-        /// <summary>The file is open: start it from the top and tell everyone waiting on it.</summary>
+        /// <summary>
+        /// The current file is going away, which takes the playback that was running on it — and
+        /// any seek still waiting to be applied, since that was aimed at this file. A seek made
+        /// after the Open call that raised this is what survives, and is the whole point: the
+        /// caller asked for the video that is arriving to start there.
+        /// </summary>
+        void HandleClosing()
+        {
+            StopPlayback();
+            _pendingSeekTime = null;
+        }
+
+        /// <summary>
+        /// Where the file about to start decoding begins: a seek made while it was opening, or
+        /// the top. Called once the metadata is known and before the first frame is queued, so
+        /// the seek target is the first frame decoded and no frame 0 is ever shown on the way.
+        /// </summary>
+        int TakeStartFrame()
+        {
+            _playbackClock.Time = Mathf.Clamp(_pendingSeekTime ?? 0f, 0f, Duration);
+            _pendingSeekTime = null;
+            return _playbackClock.ToFrame(FrameCount, FrameRate);
+        }
+
+        /// <summary>
+        /// The file is open. Its clock is already sitting on the frame decoding started from —
+        /// <see cref="TakeStartFrame"/> settled that a moment ago — so this only marks the frame
+        /// and tells everyone waiting on it.
+        /// </summary>
         void HandleOpened()
         {
-            _playbackClock.Time = 0f;
             _openedFrame = UnityEngine.Time.frameCount;
 
             Opened?.Invoke();

@@ -69,6 +69,17 @@ namespace Bluecadet.Hap
         /// </summary>
         public event Action Opened;
 
+        /// <summary>
+        /// Asked which frame the file should start decoding on, once its metadata is known and
+        /// before the first frame is queued. Null, or a handler returning 0, starts at the top.
+        ///
+        /// This exists so a seek made while the open was still in flight lands on the first
+        /// frame decoded: seeking after <see cref="Opened"/> instead would leave frame 0 already
+        /// queued, and whether it reached the screen first would come down to how the decode
+        /// thread was scheduled.
+        /// </summary>
+        public Func<int> StartFrame;
+
         // ── State ────────────────────────────────────────────────────────────
 
         /// <summary>The open file, or null. Non-null exactly while <see cref="IsOpen"/>.</summary>
@@ -361,7 +372,7 @@ namespace Bluecadet.Hap
                 return;
             }
 
-            _session.StartDecoding(_pipeline.DecodeTarget, 0);
+            _session.StartDecoding(_pipeline.DecodeTarget, StartFrame?.Invoke() ?? 0);
             _state = State.Ready;
 
             // Waiters are queued before the notification: a handler is free to close the player,
