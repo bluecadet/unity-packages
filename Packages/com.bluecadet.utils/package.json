@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.utils",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "displayName": "Bluecadet Utils",
   "description": "Utility functions and helpers for Bluecadet projects.",
   "unity": "6000.3",
