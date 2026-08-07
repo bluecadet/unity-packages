@@ -1,6 +1,6 @@
 {
   "name": "com.bluecadet.launchpad",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "displayName": "Bluecadet Launchpad",
   "description": "Client for the Launchpad controller: version tracking, staged sync, and gated hot-swap.",
   "unity": "6000.3",
