@@ -1,0 +1,140 @@
+title: Unity
+repoUrl: https://github.com/bluecadet/unity-packages
+accent: "#b3a6db"
+accent2: "#b3a6db"
+landing: index.mdx
+
+site: https://unity.bluecadet.com
+
+content:
+  # Cross-package pages that belong to no single package, authored in this docs
+  # directory. `route` is set explicitly: `base` is stripped from the route, so
+  # without it these would land at `/installing` rather than `/general/installing`.
+  - base: general
+    files: "**/*.md"
+    route: general
+
+  # Each package's docs are colocated with the package, in a Documentation~
+  # directory that Unity ignores because of the trailing `~`. `base` points at
+  # that directory rather than at the package root so the `Documentation~`
+  # segment is stripped from every route — `base` is what gets stripped, not
+  # `route`.
+  #
+  # No entry declares `assets`. Nothing is published implicitly, and no page in
+  # this site references a non-markdown file, so leaving `assets` off keeps the
+  # C# sources, shaders, .meta files and prebuilt native plugins that sit beside
+  # these directories out of the published output.
+  - base: ../Packages/com.bluecadet.hap/Documentation~
+    files: "**/*.md"
+    route: hap
+
+  - base: ../Packages/com.bluecadet.launchpad/Documentation~
+    files: "**/*.md"
+    route: launchpad
+
+  - base: ../Packages/com.bluecadet.spring/Documentation~
+    files: "**/*.md"
+    route: spring
+
+  - base: ../Packages/com.bluecadet.touchscreen/Documentation~
+    files: "**/*.md"
+    route: touchscreen
+
+  - base: ../Packages/com.bluecadet.uiblur/Documentation~
+    files: "**/*.md"
+    route: uiblur
+
+  - base: ../Packages/com.bluecadet.uiblur-hdrp/Documentation~
+    files: "**/*.md"
+    route: uiblur-hdrp
+
+  - base: ../Packages/com.bluecadet.utils/Documentation~
+    files: "**/*.md"
+    route: utils
+
+sidebar:
+  - label: Getting started
+    items:
+      - general/installing
+      - general/versioning
+
+  - label: Packages
+    items:
+      - label: Hap
+        link: hap
+        items:
+          - hap/formats
+          - hap/hap-player
+          - hap/performance
+          - hap/native-plugin
+      - label: Launchpad
+        link: launchpad
+        items:
+          - launchpad/version-lifecycle
+          - launchpad/content-toolkit
+          - launchpad/multiple-content-models
+      - label: Spring
+        link: spring
+        items:
+          - spring/springs-and-decay
+          - spring/rubberband
+      - label: Touchscreen
+        link: touchscreen
+        items:
+          - touchscreen/gestures
+      - label: Utils
+        link: utils
+        items:
+          - utils/command-line-args
+          - utils/app-environment
+          - utils/settings-file
+          - utils/settings-validation
+          - utils/editor-windows
+      - uiblur
+      - uiblur-hdrp
+
+header:
+  links:
+    - label: github
+      href: https://github.com/bluecadet/unity-packages
+    - label: bluecadet
+      href: https://bluecadet.com
+
+footer:
+  groups:
+    - title: Repo
+      links:
+        - label: github
+          href: https://github.com/bluecadet/unity-packages
+        - label: contributing
+          href: https://github.com/bluecadet/unity-packages/blob/main/CONTRIBUTING.md
+        - label: license
+          href: https://github.com/bluecadet/unity-packages/blob/main/LICENSE
+    - title: Install
+      links:
+        - label: openupm cli
+          href: https://openupm.com/docs/getting-started.html#installing-openupm-cli
+        - label: releases
+          href: https://github.com/bluecadet/unity-packages/releases
+    - title: Bluecadet
+      links:
+        - label: bluecadet
+          href: https://bluecadet.com
+          note: bluecadet.com
+        - label: launchpad
+          href: https://launchpad.bluecadet.com
+          note: launchpad.bluecadet.com
+        - label: preflight
+          href: https://preflight.bluecadet.com
+          note: preflight.bluecadet.com
+  meta: MIT licensed
+
+# No top-level `version`: the seven packages version independently, so a single
+# site-wide version string would be wrong for six of them. Per-package versions
+# live on each package's own page.
+sidebarMeta: |
+  MIT licensed
+  Unity 6000.3+
+
+toc:
+  editLink: "https://github.com/bluecadet/unity-packages/edit/main/{path}"

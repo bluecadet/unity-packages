@@ -1,0 +1,54 @@
+---
+title: Unity packages for media experiences
+description: "Editor tooling, build pipelines, and runtime utilities we wrote because we needed them. They are free, open source, and maintained because we depend on them too."
+---
+
+import {
+  StatStrip, Stat,
+  Features, Feature,
+  GlyphList, GlyphItem,
+  CtaCards, CtaCard,
+  ClosingCta,
+  Hero, HeroEyebrows, HeroEyebrow, HeroInstall, HeroNotes, HeroNote, HeroActions,
+  OtherTools, OtherToolItem,
+  RegistryTable, RegistryRow,
+  Button
+} from "@bluecadet/docs/components";
+
+<Hero
+  lead="Editor tooling, build pipelines, and runtime utilities we wrote because we needed them. They are free, open source, and maintained because we depend on them too."
+>
+  <Fragment slot="title">Unity packages for <em>exhibit installations</em>.</Fragment>
+  <HeroEyebrows>
+    <HeroEyebrow tone="attention">unity 6000.3+</HeroEyebrow>
+    <HeroEyebrow tone="state">open source</HeroEyebrow>
+    <HeroEyebrow>mit licensed</HeroEyebrow>
+  </HeroEyebrows>
+  <HeroActions>
+    <Button variant="primary" href="#registry-table">browse packages</Button>
+    <Button variant="secondary" href="/general/installing">read the docs →</Button>
+  </HeroActions>
+</Hero>
+
+import Table from '@docs-src/Table.astro';
+
+<Table />
+
+<OtherTools title="More tools from Bluecadet" subtitle="Other open source tools built for exhibit and installation work.">
+  <OtherToolItem
+    title="Launchpad"
+    subtitle="Content & App Orchestration"
+    url="https://launchpad.bluecadet.com"
+    description="Toolkit for exhibit and installation work: content syncing from your CMS, app launching and restart-on-crash, and logs forwarded somewhere you'll actually see them."
+  />
+  <OtherToolItem
+    title="Preflight"
+    subtitle="Windows Bootstrapping"
+    url="https://preflight.bluecadet.com"
+    description="Windows-first configuration management CLI for managed endpoints such as kiosks, signage, exhibit PCs, and other dedicated systems."
+  />
+</OtherTools>
+
+<ClosingCta>
+  <Fragment slot="title">Install whichever you need.</Fragment>
+</ClosingCta>

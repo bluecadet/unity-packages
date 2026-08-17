@@ -1,0 +1,118 @@
+---
+// The landing page's package registry. Every column except `kind` is read off disk at build time,
+// so a release only has to bump the manifest — nothing here restates a version, an id, or a
+// blurb. `kind` is the one editorial field with no manifest source, so it lives in PACKAGES below.
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+
+import {
+  RegistryTable, RegistryRow
+} from "@bluecadet/docs/components";
+
+/**
+ * Display order, plus the one field no `package.json` carries. Directory names, not ids — the id,
+ * version and description all come from each directory's manifest. Adding a package to
+ * `Packages/` without adding it here fails the build (see the check below) rather than quietly
+ * dropping it off the landing page.
+ */
+const PACKAGES = [
+  { dir: "com.bluecadet.hap", kind: "video" },
+  { dir: "com.bluecadet.launchpad", kind: "content" },
+  { dir: "com.bluecadet.spring", kind: "animation" },
+  { dir: "com.bluecadet.touchscreen", kind: "input" },
+  { dir: "com.bluecadet.utils", kind: "runtime" },
+  { dir: "com.bluecadet.uiblur", kind: "rendering" },
+  { dir: "com.bluecadet.uiblur-hdrp", kind: "rendering" },
+];
+
+// `DOCS_CONFIG_DIR` is the directory holding docs.config.yaml — this file's own directory — set by
+// `docs dev`/`docs build`. Not `import.meta.url`: this component is imported into a page that lives
+// in the theme's app, and the build bundles it into a chunk there, so `import.meta.url` points at
+// the chunk rather than at this file.
+const configDir = process.env.DOCS_CONFIG_DIR;
+if (!configDir) {
+  throw new Error("Table.astro: DOCS_CONFIG_DIR is unset — this page only builds via the docs CLI.");
+}
+const repoRoot = path.join(configDir, "..");
+const packagesDir = path.join(repoRoot, "Packages");
+
+const onDisk = fs
+  .readdirSync(packagesDir, { withFileTypes: true })
+  .filter((e) => e.isDirectory())
+  .map((e) => e.name);
+const unlisted = onDisk.filter((dir) => !PACKAGES.some((p) => p.dir === dir));
+if (unlisted.length > 0) {
+  throw new Error(
+    `Table.astro: ${unlisted.join(", ")} exist in Packages/ but aren't in PACKAGES — add them (with a \`kind\`) so they show up in the registry.`,
+  );
+}
+
+/**
+ * Last commit that touched the package directory, as an ISO date. Best-effort, matching the docs
+ * CLI's own git helpers: a shallow clone (`actions/checkout` defaults to `fetch-depth: 1`) or a
+ * missing git returns nothing and the row simply renders without an `updated` cell.
+ */
+function lastCommitDate(dir: string): Date | undefined {
+  try {
+    const iso = execFileSync(
+      "git",
+      ["log", "-1", "--format=%cI", "--", path.posix.join("Packages", dir)],
+      { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return iso ? new Date(iso) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+const DAY_MS = 86_400_000;
+
+/** "3 weeks ago" / "yesterday" — coarsest unit that still reads as a whole number. */
+function relativeTime(date: Date | undefined, now: Date): string | undefined {
+  if (!date) return undefined;
+  const days = Math.round((date.getTime() - now.getTime()) / DAY_MS);
+  const months = Math.round(days / 30.44);
+  if (Math.abs(days) < 7) return relative.format(days, "day");
+  if (Math.abs(months) < 1) return relative.format(Math.round(days / 7), "week");
+  if (Math.abs(months) < 12) return relative.format(months, "month");
+  return relative.format(Math.round(months / 12), "year");
+}
+
+const now = new Date();
+
+const packages = PACKAGES.map(({ dir, kind }) => {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(packagesDir, dir, "package.json"), "utf8"),
+  );
+  // `name` is the id minus the reverse-DNS prefix, which is also the route each package's docs are
+  // published at (see docs.config.yaml's `content` entries). Relative href, not `/hap/`: the
+  // landing page is `/`, and a relative link keeps working under a deployed `base`.
+  const short = manifest.name.replace(/^com\.bluecadet\./, "");
+  return {
+    name: short,
+    id: manifest.name,
+    version: manifest.version,
+    description: manifest.description,
+    href: `${short}/`,
+    kind,
+    updated: relativeTime(lastCommitDate(dir), now),
+  };
+});
+---
+
+<RegistryTable id="registry-table">
+  {packages.map((pkg) => (
+    <RegistryRow
+      name={pkg.name}
+      id={pkg.id}
+      version={pkg.version}
+      kind={pkg.kind}
+      updated={pkg.updated}
+      href={pkg.href}
+    >
+      {pkg.description}
+    </RegistryRow>
+  ))}
+</RegistryTable>

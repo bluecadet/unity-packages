@@ -100,6 +100,7 @@ InitTestScene*.unity*
 
 !Native~
 !Tests~
+!Documentation~
 
 /Projects/*
 !/Projects/LaunchpadDemo
@@ -107,3 +108,9 @@ InitTestScene*.unity*
 !Packages/*/Plugins/**/*.dll
 !Packages/*/Plugins/**/*.bundle
 !Packages/*/Plugins/**/*.so
+
+# Docs site. The root package.json only links @bluecadet/docs for local
+# `npm run dev`; CI installs it from the registry via npx and never reads
+# the lockfile, so the lockfile is local-only noise here.
+node_modules
+dist

@@ -20,7 +20,8 @@ Install with the [openupm CLI](https://openupm.com/docs/getting-started.html#ins
 openupm add com.bluecadet.spring
 ```
 
-Or add the scoped registry manually to `Packages/manifest.json`:
+Or add the scoped registry manually to `Packages/manifest.json`, replacing
+`[PACKAGE_NAME]` with the package name and `[VERSION]` with a released version:
 
 ```json
 {
@@ -32,7 +33,7 @@ Or add the scoped registry manually to `Packages/manifest.json`:
     }
   ],
   "dependencies": {
-    "com.bluecadet.spring": "0.1.0"
+    "[PACKAGE_NAME]": "[VERSION]"
   }
 }
 ```
@@ -41,24 +42,39 @@ The scoped registry only needs to be added once per project regardless of how ma
 
 ### Via Git URL
 
-Add the following to `Packages/manifest.json`, replacing `[PACKAGE_NAME]` with the package folder name and `[RELEASE_TAG]` with the version tag:
+Add the following to `Packages/manifest.json`, replacing `[PACKAGE_NAME]` with the package name and `[RELEASE_TAG]` with the version tag:
 
 ```json
 {
   "dependencies": {
-    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/[PACKAGE_NAME]#[RELEASE_TAG]"
+    "[PACKAGE_NAME]": "https://github.com/bluecadet/unity-packages.git?path=Packages/[PACKAGE_NAME]#[RELEASE_TAG]"
   }
 }
 ```
 
-For example, to install `com.bluecadet.spring` at version `0.1.0`:
+Release tags are `{package-name}@{version}` — no `v` prefix and no shorthand name.
+For example, to install `com.bluecadet.spring` at version `1.0.1`:
 
 ```json
 {
   "dependencies": {
-    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.spring#com.bluecadet.spring@0.1.0"
+    "com.bluecadet.spring": "https://github.com/bluecadet/unity-packages.git?path=Packages/com.bluecadet.spring#com.bluecadet.spring@1.0.1"
   }
 }
+```
+
+Current versions are listed on each package's page; every released tag is on the
+[Releases](https://github.com/bluecadet/unity-packages/releases) page.
+
+## Documentation
+
+Each package's documentation lives beside it, in that package's `Documentation~`
+directory, and the whole set is built into one site by
+[`@bluecadet/docs`](https://github.com/bluecadet/docs):
+
+```sh
+npm install
+npm run dev
 ```
 
 ## Publishing Changes
