@@ -3,6 +3,7 @@ repoUrl: https://github.com/bluecadet/unity-packages
 accent: "#b3a6db"
 accent2: "#b3a6db"
 landing: index.mdx
+favicon: "favicon.svg"
 
 site: https://unity.bluecadet.com
 
@@ -13,6 +14,8 @@ content:
   - base: general
     files: "**/*.md"
     route: general
+    assets:
+      - "favicon.svg"
 
   # Each package's docs are colocated with the package, in a Documentation~
   # directory that Unity ignores because of the trailing `~`. `base` points at
