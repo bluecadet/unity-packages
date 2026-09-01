@@ -48,4 +48,5 @@ SettingsFile<AppSettings> settings = env.SettingsFile<AppSettings>();
 
 `public SettingsFile<T> SettingsFile<T>(string baseName = "settings") where T : class, new()` is
 an instance method (not an extension method) that builds a [settings cascade](settings-file.md)
-rooted at `DataPath`. Pass `baseName` to load a settings file other than `settings.json`.
+rooted at `DataPath`. Pass `baseName` to load a settings file other than `settings.yaml` /
+`settings.json`.

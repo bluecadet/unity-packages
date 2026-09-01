@@ -1,7 +1,7 @@
 # Bluecadet Utils
 
 Utilities for the parts of an installation build that sit outside the scene:
-command-line arguments, a machine-aware JSON settings cascade with CLI overrides,
+command-line arguments, a machine-aware YAML/JSON settings cascade with CLI overrides,
 settings validation, and the editor windows that drive both.
 
 Requires Unity 6000.3+ and `com.unity.nuget.newtonsoft-json`.
@@ -30,8 +30,14 @@ SettingsFile<AppSettings> settings = env.SettingsFile<AppSettings>();
 AppSettings value = settings.Value;              // merged cascade + --set overrides
 ```
 
-Settings merge `settings.json`, `settings.<machineId>.json`, `settings.local.json`,
+Settings merge `settings.yaml`, `settings.<machineId>.yaml`, `settings.local.yaml`,
 and repeatable `--set key.path=value` CLI overrides, in that order of precedence.
+Each tier may also be a `.json` file (the `.yaml` form wins if both exist), and
+editor saves into YAML tiers preserve their comments.
+
+The package bundles YamlDotNet 18.1.0 (`Plugins/YamlDotNet.dll`, Auto Reference
+off). If your project already carries its own `YamlDotNet.dll`, Unity reports a
+duplicate-assembly error — remove the project-local copy to resolve it.
 
 **Tools > Bluecadet** opens the Simulated Args and Settings editor windows.
 
