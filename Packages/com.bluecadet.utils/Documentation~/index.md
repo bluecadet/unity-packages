@@ -50,13 +50,19 @@ Pick a version from [Releases](https://github.com/bluecadet/unity-packages/relea
 - Unity 6000.3 or later
 - `com.unity.nuget.newtonsoft-json` 3.2.1
 
+The package also bundles its own copy of [YamlDotNet](https://github.com/aaubry/YamlDotNet)
+18.1.0 (MIT) as `Plugins/YamlDotNet.dll`, for the YAML side of the
+[settings cascade](settings-file.md). Auto Reference is off, so it is only visible to this
+package's assemblies. A project that carries its own `YamlDotNet.dll` gets a duplicate-assembly
+error from Unity — remove the project-local copy.
+
 ## Utilities
 
 | Page | Description |
 | --- | --- |
 | [CommandLineArgs](command-line-args.md) | Parses `--flag value`, `--key=value`, and bare `--flag` arguments. |
 | [AppEnvironment](app-environment.md) | Immutable snapshot of data path, machine ID, and parsed args; entry point for `SettingsFile<T>`. |
-| [Settings files](settings-file.md) | Cascading JSON settings loader with `--set` CLI overrides. |
+| [Settings files](settings-file.md) | Cascading YAML/JSON settings loader with `--set` CLI overrides. |
 | [Settings validation](settings-validation.md) | `ISettingsValidator` for reporting bad settings values in the editor. |
 | [Editor windows](editor-windows.md) | Tools > Bluecadet windows for simulated args and typed settings editing. |
 

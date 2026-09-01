@@ -44,10 +44,12 @@ confirmation.
 - **Save to Base / Machine / Local** writes only the fields you changed into that tier's file,
   leaving its other keys alone. Saving to `Base` or `Machine` also drops any `Local` override that
   would shadow the new value. Saving to `Local` skips values that already match `Base`+`Machine`,
-  so the file never accumulates redundant overrides. Files that end up empty are deleted.
+  so the file never accumulates redundant overrides. Files that end up empty are deleted, except a
+  YAML file left holding only comments.
 - **Revert** re-reads the cascade and drops unsaved edits.
-- Footer foldouts show the merged JSON read-only and every tier file's path, with buttons to
-  reveal it in the file browser or delete it.
+- Footer foldouts show the merged settings read-only and every tier file's path, with buttons to
+  reveal it in the file browser or delete it. Tier files may be YAML or JSON; saves into a YAML
+  tier preserve its comments (see [Settings files](settings-file.md) for the YAML notes).
 
 ### Fallback view
 
@@ -57,5 +59,5 @@ read-only view listing each dotted path, its merged value, and the tier
 
 ## Known limitation
 
-JSON keys are assumed to match C# field names, so `[JsonProperty]` renames are not supported, and
+Settings keys are assumed to match C# field names, so `[JsonProperty]` renames are not supported, and
 arrays are treated as single values rather than per-element ones.
