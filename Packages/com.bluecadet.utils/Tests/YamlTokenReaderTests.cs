@@ -137,6 +137,46 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		[Test]
+		public void ToJObject_CyclicAlias_ThrowsInsteadOfRecursing()
+		{
+			// A node aliased into itself must be caught by the ancestor guard (or rejected by
+			// YamlDotNet outright) — never a stack overflow.
+			Assert.That(() => YamlTokenReader.ToJObject("a: &x\n  self: *x\n"), Throws.Exception);
+		}
+
+		[Test]
+		public void ToJObject_NumericEdgeForms()
+		{
+			JObject result = YamlTokenReader.ToJObject(
+				"signed: +42\n" +
+				"padded: 007\n" +
+				"bareDot: 1.\n" +
+				"huge: 99999999999999999999999\n");
+
+			Assert.That((long)result["signed"], Is.EqualTo(42L));
+			Assert.That((long)result["padded"], Is.EqualTo(7L));
+			Assert.That(result["bareDot"].Type, Is.EqualTo(JTokenType.Float));
+			Assert.That((double)result["bareDot"], Is.EqualTo(1.0));
+
+			// Too large for a long: widened to double rather than silently becoming a string.
+			Assert.That(result["huge"].Type, Is.EqualTo(JTokenType.Float));
+			Assert.That((double)result["huge"], Is.EqualTo(1e23).Within(1e9));
+		}
+
+		[Test]
+		public void ToJObject_BlockSequenceOfMappings()
+		{
+			JObject result = YamlTokenReader.ToJObject(
+				"items:\n" +
+				"  - x: 1\n" +
+				"    y: 2\n" +
+				"  - x: 3\n");
+
+			Assert.That((long)result["items"][0]["y"], Is.EqualTo(2L));
+			Assert.That((long)result["items"][1]["x"], Is.EqualTo(3L));
+		}
+
+		[Test]
 		public void ToJObject_MergeKey_ComesThroughAsLiteralKey()
 		{
 			JObject result = YamlTokenReader.ToJObject(
