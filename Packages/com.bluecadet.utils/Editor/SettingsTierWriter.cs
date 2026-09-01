@@ -10,9 +10,11 @@ using UnityEngine;
 namespace Bluecadet.Utils.Editor
 {
 	/// <summary>
-	/// Writes sparse, per-path edits into a <see cref="SettingsFile{T}"/> tier's backing JSON file,
+	/// Writes sparse, per-path edits into a <see cref="SettingsFile{T}"/> tier's backing file,
 	/// stripping stale shadows from other tiers and pruning files down to nothing when they end up
-	/// empty. Ported from the pre-rework SettingsManagerEditor tier-write semantics.
+	/// empty. JSON tiers are rewritten wholesale from a <see cref="JObject"/>; YAML tiers are patched
+	/// as text so their comments survive. Ported from the pre-rework SettingsManagerEditor
+	/// tier-write semantics.
 	/// </summary>
 	internal sealed class SettingsTierWriter
 	{
@@ -33,12 +35,18 @@ namespace Bluecadet.Utils.Editor
 		/// <paramref name="target"/>'s backing file, leaving every other key in that file untouched.
 		/// When <paramref name="target"/> is <see cref="SettingsTier.Base"/> or <see cref="SettingsTier.Machine"/>,
 		/// the same paths are also stripped out of the <see cref="SettingsTier.Local"/> file so it can't shadow
-		/// the new value. When <paramref name="target"/> is <see cref="SettingsTier.Local"/>, a leaf is only
-		/// written if it differs from the effective Base+Machine value; otherwise any existing Local override
-		/// at that path is removed, so Local never carries a redundant override.
+		/// the new value; that strip is attempted in memory before anything reaches disk, so an unwritable
+		/// Local file fails the whole save and leaves every file untouched. When <paramref name="target"/> is
+		/// <see cref="SettingsTier.Local"/>, a leaf is only written if it differs from the effective
+		/// Base+Machine value; otherwise any existing Local override at that path is removed, so Local never
+		/// carries a redundant override.
 		/// Dirty paths that <paramref name="fullValue"/> does not define at all are skipped and reported,
 		/// never written as JSON null.
 		/// </summary>
+		/// <exception cref="InvalidOperationException">
+		/// A tier file could not be edited (malformed, or YAML the patcher cannot rewrite). The message names
+		/// that file's path on disk and says nothing was written; the underlying failure is the inner exception.
+		/// </exception>
 		public void SaveDirtyPaths(SettingsTier target, JObject fullValue, IEnumerable<string> dirtyPaths)
 		{
 			if (target == SettingsTier.Cli)
@@ -50,47 +58,82 @@ namespace Bluecadet.Utils.Editor
 
 			var touchedPaths = new List<string>();
 
+			string localPath = _cascade.PathFor(SettingsTier.Local);
+
 			if (target == SettingsTier.Local)
 			{
 				JObject effective = LoadEffectiveBaseAndMachine();
-				string localPath = _cascade.PathFor(SettingsTier.Local);
-				JObject local = LoadTierFile(localPath);
+				ITierFileEditor local;
 
-				foreach (SettingsPath path in paths)
+				try
 				{
-					JToken leaf = path.Resolve(fullValue);
-					JToken effectiveValue = path.Resolve(effective);
+					local = OpenTier(localPath);
 
-					if (LeafEquals(leaf, effectiveValue))
-						path.Remove(local);
-					else
-						path.Set(local, leaf);
+					foreach (SettingsPath path in paths)
+					{
+						JToken leaf = path.Resolve(fullValue);
+						JToken effectiveValue = path.Resolve(effective);
+
+						if (LeafEquals(leaf, effectiveValue))
+							local.Remove(path);
+						else
+							local.Set(path, leaf);
+					}
+				}
+				catch (Exception ex)
+				{
+					throw CouldNotEdit(SettingsTier.Local, localPath, null, ex);
 				}
 
-				SaveOrDelete(localPath, local, touchedPaths);
+				local.Save(touchedPaths);
 			}
 			else
 			{
 				string targetPath = _cascade.PathFor(target);
-				JObject targetObject = LoadTierFile(targetPath);
+				ITierFileEditor targetEditor;
 
-				foreach (SettingsPath path in paths)
-					path.Set(targetObject, path.Resolve(fullValue));
-
-				SaveOrDelete(targetPath, targetObject, touchedPaths);
-
-				string localPath = _cascade.PathFor(SettingsTier.Local);
-				JObject local = LoadTierFile(localPath);
-				bool localChanged = false;
-
-				foreach (SettingsPath path in paths)
+				try
 				{
-					if (path.Remove(local))
-						localChanged = true;
+					targetEditor = OpenTier(targetPath);
+
+					foreach (SettingsPath path in paths)
+						targetEditor.Set(path, path.Resolve(fullValue));
+				}
+				catch (Exception ex)
+				{
+					throw CouldNotEdit(target, targetPath, null, ex);
 				}
 
+				// Strip the Local shadows in memory before anything reaches disk. A Local file the editor
+				// cannot rewrite (malformed YAML, or flow-style/anchored YAML) throws here, and a target write
+				// that had already landed would leave the value saved but still shadowed. Both editors only
+				// touch disk in Save, so failing here leaves every file exactly as it was.
+				ITierFileEditor local;
+				bool localChanged = false;
+
+				try
+				{
+					local = OpenTier(localPath);
+
+					foreach (SettingsPath path in paths)
+					{
+						if (local.Remove(path))
+							localChanged = true;
+					}
+				}
+				catch (Exception ex)
+				{
+					throw CouldNotEdit(
+						SettingsTier.Local,
+						localPath,
+						$"while dropping the override that would shadow the new {target} value",
+						ex);
+				}
+
+				targetEditor.Save(touchedPaths);
+
 				if (localChanged)
-					SaveOrDelete(localPath, local, touchedPaths);
+					local.Save(touchedPaths);
 			}
 
 			RefreshAssetsIfNeeded(touchedPaths);
@@ -168,36 +211,115 @@ namespace Bluecadet.Utils.Editor
 		private JObject LoadEffectiveBaseAndMachine()
 		{
 			var effective = new JObject();
-			effective.Merge(LoadTierFile(_cascade.PathFor(SettingsTier.Base)), _mergeSettings);
-			effective.Merge(LoadTierFile(_cascade.PathFor(SettingsTier.Machine)), _mergeSettings);
+			effective.Merge(SettingsFormatIO.Parse(_cascade.PathFor(SettingsTier.Base)), _mergeSettings);
+			effective.Merge(SettingsFormatIO.Parse(_cascade.PathFor(SettingsTier.Machine)), _mergeSettings);
 			return effective;
 		}
 
-		/// <summary>Parses the JSON file at <paramref name="path"/>, or returns an empty object if it doesn't exist.</summary>
-		private static JObject LoadTierFile(string path)
+		/// <summary>
+		/// Per-format editing of one tier file: the same sparse set/remove operations, saved however
+		/// the format demands. Nothing touches disk before <see cref="Save"/>, so a failed edit leaves the
+		/// file as it was. When that failure surfaces differs by format: a JSON tier is parsed on open, so
+		/// malformed content throws in the constructor, while a YAML tier is read as raw text and only parsed
+		/// inside <see cref="Set"/> and <see cref="Remove"/>, so malformed or unrewritable content throws
+		/// there instead.
+		/// </summary>
+		private interface ITierFileEditor
 		{
-			if (string.IsNullOrEmpty(path) || !File.Exists(path))
-				return new JObject();
-
-			return JObject.Parse(File.ReadAllText(path));
+			void Set(SettingsPath path, JToken value);
+			bool Remove(SettingsPath path);
+			void Save(List<string> touchedPaths);
 		}
 
-		/// <summary>Writes <paramref name="value"/> pretty-printed to <paramref name="path"/>, or deletes the file if it's empty.</summary>
-		private void SaveOrDelete(string path, JObject value, List<string> touchedPaths)
+		/// <summary>
+		/// Rewrites an in-memory tier-edit failure so the surfaced message names the file that could not be
+		/// edited. The underlying messages name only the dotted settings path, which sends a user saving Base
+		/// off to debug the wrong file when it was their Local file that could not be stripped.
+		/// <paramref name="why"/> spells out what the edit was for, so a failure in the target tier itself is
+		/// not mislabelled as a Local problem.
+		/// </summary>
+		private static InvalidOperationException CouldNotEdit(SettingsTier tier, string path, string why, Exception inner)
 		{
-			if (value.HasValues)
-			{
-				string directory = Path.GetDirectoryName(path);
-				if (!string.IsNullOrEmpty(directory))
-					Directory.CreateDirectory(directory);
+			string reason = string.IsNullOrEmpty(why) ? string.Empty : " " + why;
 
-				File.WriteAllText(path, value.ToString(Formatting.Indented));
-				touchedPaths.Add(path);
-			}
-			else
+			return new InvalidOperationException(
+				$"The {tier} settings file at '{path}' could not be edited{reason}. " +
+				$"Nothing was written and every settings file is unchanged. {inner.Message}",
+				inner);
+		}
+
+		private static ITierFileEditor OpenTier(string path) =>
+			SettingsFormatIO.FormatFor(path) == SettingsFormat.Yaml
+				? (ITierFileEditor)new YamlTierEditor(path)
+				: new JsonTierEditor(path);
+
+		/// <summary>Edits a JSON tier as a <see cref="JObject"/> and rewrites the whole file pretty-printed.</summary>
+		private sealed class JsonTierEditor : ITierFileEditor
+		{
+			private readonly string _path;
+			private readonly JObject _value;
+
+			public JsonTierEditor(string path)
 			{
-				DeleteFile(path, touchedPaths);
+				_path = path;
+				_value = SettingsFormatIO.Parse(path);
 			}
+
+			public void Set(SettingsPath path, JToken value) => path.Set(_value, value);
+
+			public bool Remove(SettingsPath path) => path.Remove(_value);
+
+			public void Save(List<string> touchedPaths)
+			{
+				if (_value.HasValues)
+					WriteTierFile(_path, _value.ToString(Formatting.Indented), touchedPaths);
+				else
+					DeleteFile(_path, touchedPaths);
+			}
+		}
+
+		/// <summary>
+		/// Edits a YAML tier as raw text through <see cref="YamlTierPatcher"/>, so comments outside the
+		/// edited spans survive. A file left with nothing but whitespace is deleted; one holding only
+		/// comments is kept (it parses as an empty tier).
+		/// </summary>
+		private sealed class YamlTierEditor : ITierFileEditor
+		{
+			private readonly string _path;
+			private string _text;
+
+			public YamlTierEditor(string path)
+			{
+				_path = path;
+				_text = File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+			}
+
+			public void Set(SettingsPath path, JToken value) => _text = YamlTierPatcher.SetPath(_text, path, value);
+
+			public bool Remove(SettingsPath path)
+			{
+				bool removed = YamlTierPatcher.TryRemovePath(_text, path, out string result);
+				_text = result;
+				return removed;
+			}
+
+			public void Save(List<string> touchedPaths)
+			{
+				if (YamlTierPatcher.IsWhitespaceOnly(_text))
+					DeleteFile(_path, touchedPaths);
+				else
+					WriteTierFile(_path, _text, touchedPaths);
+			}
+		}
+
+		private static void WriteTierFile(string path, string contents, List<string> touchedPaths)
+		{
+			string directory = Path.GetDirectoryName(path);
+			if (!string.IsNullOrEmpty(directory))
+				Directory.CreateDirectory(directory);
+
+			File.WriteAllText(path, contents);
+			touchedPaths.Add(path);
 		}
 
 		/// <summary>Deletes <paramref name="path"/> and its <c>.meta</c> sibling, if present.</summary>

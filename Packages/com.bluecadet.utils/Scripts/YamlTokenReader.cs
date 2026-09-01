@@ -149,6 +149,21 @@ namespace Bluecadet.Utils
 		internal static bool IsNullLiteral(string value) =>
 			value.Length == 0 || value == "~" || value == "null" || value == "Null" || value == "NULL";
 
+		/// <summary>
+		/// True when writing <paramref name="value"/> as a plain scalar would read back as something
+		/// other than that string (a null, bool or number), so a writer must quote it.
+		/// </summary>
+		internal static bool WouldRetypeAsPlainScalar(string value) =>
+			IsNullLiteral(value)
+			|| value == "true" || value == "True" || value == "TRUE"
+			|| value == "false" || value == "False" || value == "FALSE"
+			|| _intPattern.IsMatch(value)
+			|| _hexPattern.IsMatch(value)
+			|| _octalPattern.IsMatch(value)
+			|| _floatPattern.IsMatch(value)
+			|| _infinityPattern.IsMatch(value)
+			|| _nanPattern.IsMatch(value);
+
 		private static bool TryParseRadix(string digits, int radix, out long result)
 		{
 			try
