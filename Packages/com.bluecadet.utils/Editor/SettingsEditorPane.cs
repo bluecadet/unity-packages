@@ -608,7 +608,7 @@ namespace Bluecadet.Utils.Editor
 
 				try
 				{
-					SettingsAnalysis.FlattenPaths(JObject.Parse(File.ReadAllText(path)), persistedPaths);
+					SettingsAnalysis.FlattenPaths(SettingsFormatIO.Parse(path), persistedPaths);
 				}
 				catch
 				{

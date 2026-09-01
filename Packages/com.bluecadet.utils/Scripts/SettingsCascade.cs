@@ -56,6 +56,10 @@ namespace Bluecadet.Utils
 
 			foreach (SettingsTier tier in FileTiers)
 			{
+				string stem = StemFor(tier);
+				if (File.Exists(_environment.ResolvePath(stem + ".yaml")) && File.Exists(_environment.ResolvePath(stem + ".json")))
+					_warnings.Add($"Both '{stem}.yaml' and '{stem}.json' exist for the {tier} tier; using the YAML file.");
+
 				string path = PathFor(tier);
 
 				if (TryLoadTierFile(path, out JObject tierObject, out Exception error))
@@ -86,14 +90,42 @@ namespace Bluecadet.Utils
 		/// <summary>
 		/// Returns the on-disk path for a file tier of <c>baseName</c> under the environment's data path,
 		/// or null for <see cref="SettingsTier.Cli"/>, which comes from arguments and has no backing file.
+		/// Each tier probes for a <c>.yaml</c> file first, then <c>.json</c>; when neither exists the path
+		/// names the file a save would create, in the Base tier's format (YAML when there is no Base file).
 		/// </summary>
-		internal string PathFor(SettingsTier tier) => tier switch
+		internal string PathFor(SettingsTier tier)
 		{
-			SettingsTier.Base => _environment.ResolvePath($"{_baseName}.json"),
-			SettingsTier.Machine => _environment.ResolvePath($"{_baseName}.{_environment.MachineId}.json"),
-			SettingsTier.Local => _environment.ResolvePath($"{_baseName}.local.json"),
+			string stem = StemFor(tier);
+			if (stem == null)
+				return null;
+
+			string yamlPath = _environment.ResolvePath(stem + ".yaml");
+			if (File.Exists(yamlPath))
+				return yamlPath;
+
+			string jsonPath = _environment.ResolvePath(stem + ".json");
+			if (File.Exists(jsonPath))
+				return jsonPath;
+
+			return _environment.ResolvePath($"{stem}.{DefaultExtension()}");
+		}
+
+		/// <summary>The tier's file name without its format extension, or null for <see cref="SettingsTier.Cli"/>.</summary>
+		private string StemFor(SettingsTier tier) => tier switch
+		{
+			SettingsTier.Base => _baseName,
+			SettingsTier.Machine => $"{_baseName}.{_environment.MachineId}",
+			SettingsTier.Local => $"{_baseName}.local",
 			_ => null
 		};
+
+		private string DefaultExtension()
+		{
+			if (File.Exists(_environment.ResolvePath($"{_baseName}.yaml")))
+				return "yaml";
+
+			return File.Exists(_environment.ResolvePath($"{_baseName}.json")) ? "json" : "yaml";
+		}
 
 		/// <summary>
 		/// Returns the tier that produced the effective value at <paramref name="dottedPath"/>
@@ -115,7 +147,7 @@ namespace Bluecadet.Utils
 		}
 
 		/// <summary>
-		/// Attempts to parse the JSON file at <paramref name="path"/> into a <see cref="JObject"/>.
+		/// Attempts to parse the tier file at <paramref name="path"/> into a <see cref="JObject"/>.
 		/// Returns false if the file is missing (with <paramref name="error"/> left null) or malformed
 		/// (with <paramref name="error"/> set to the parse exception).
 		/// </summary>
@@ -129,7 +161,7 @@ namespace Bluecadet.Utils
 
 			try
 			{
-				result = JObject.Parse(File.ReadAllText(path));
+				result = SettingsFormatIO.Parse(path);
 				return true;
 			}
 			catch (Exception ex)

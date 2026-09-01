@@ -212,9 +212,10 @@ namespace Bluecadet.Utils.Tests
 		{
 			var settingsFile = MakeEnvironment().SettingsFile<TestSettings>();
 
-			Assert.That(settingsFile.PathFor(SettingsTier.Base), Is.EqualTo(Path.Combine(_tempDir, "settings.json")));
-			Assert.That(settingsFile.PathFor(SettingsTier.Machine), Is.EqualTo(Path.Combine(_tempDir, "settings.TEST-MACHINE.json")));
-			Assert.That(settingsFile.PathFor(SettingsTier.Local), Is.EqualTo(Path.Combine(_tempDir, "settings.local.json")));
+			// No tier files exist here, so the paths name the files a save would create: YAML by default.
+			Assert.That(settingsFile.PathFor(SettingsTier.Base), Is.EqualTo(Path.Combine(_tempDir, "settings.yaml")));
+			Assert.That(settingsFile.PathFor(SettingsTier.Machine), Is.EqualTo(Path.Combine(_tempDir, "settings.TEST-MACHINE.yaml")));
+			Assert.That(settingsFile.PathFor(SettingsTier.Local), Is.EqualTo(Path.Combine(_tempDir, "settings.local.yaml")));
 		}
 
 		[Test]

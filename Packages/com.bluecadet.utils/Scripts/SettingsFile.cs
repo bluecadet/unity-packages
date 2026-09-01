@@ -9,13 +9,13 @@ namespace Bluecadet.Utils
 	/// </summary>
 	public enum SettingsTier
 	{
-		/// <summary>The shared base settings file (<c>&lt;name&gt;.json</c>).</summary>
+		/// <summary>The shared base settings file (<c>&lt;name&gt;.yaml</c> or <c>&lt;name&gt;.json</c>).</summary>
 		Base,
 
-		/// <summary>The per-machine override file (<c>&lt;name&gt;.&lt;machineId&gt;.json</c>).</summary>
+		/// <summary>The per-machine override file (<c>&lt;name&gt;.&lt;machineId&gt;.yaml</c> or <c>&lt;name&gt;.&lt;machineId&gt;.json</c>).</summary>
 		Machine,
 
-		/// <summary>The local override file (<c>&lt;name&gt;.local.json</c>), typically machine-specific and git-ignored.</summary>
+		/// <summary>The local override file (<c>&lt;name&gt;.local.yaml</c> or <c>&lt;name&gt;.local.json</c>), typically machine-specific and git-ignored.</summary>
 		Local,
 
 		/// <summary>Overrides supplied via repeated <c>--set key.path=value</c> command-line arguments.</summary>
@@ -23,7 +23,7 @@ namespace Bluecadet.Utils
 	}
 
 	/// <summary>
-	/// Loads and merges a cascade of JSON settings files, plus CLI <c>--set</c> overrides,
+	/// Loads and merges a cascade of YAML or JSON settings files, plus CLI <c>--set</c> overrides,
 	/// into a plain object of type <typeparamref name="T"/>. Construct via <see cref="AppEnvironment.SettingsFile{T}"/>.
 	/// </summary>
 	public sealed class SettingsFile<T> where T : class, new()
