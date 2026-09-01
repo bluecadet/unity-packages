@@ -543,16 +543,197 @@ namespace Bluecadet.Utils.Tests
 		}
 
 		[Test]
+		public void SaveDirtyPaths_TwoNewPathsIntoSameNewYamlMapping_Compose()
+		{
+			var fullValue = JObject.Parse(@"{ ""general"": { ""a"": 1, ""b"": 2 } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.a", "general.b" });
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo("general:\n  a: 1\n  b: 2\n"));
+		}
+
+		[Test]
+		public void DeleteTier_YamlFile_RemovesIt()
+		{
+			WriteBaseYaml("general:\n  debugMode: true\n");
+
+			MakeWriter().DeleteTier(SettingsTier.Base);
+
+			Assert.That(File.Exists(BaseYamlPath), Is.False);
+		}
+
+		[Test]
 		public void SaveDirtyPaths_FlowStyleYamlTarget_ThrowsAndLeavesFileUntouched()
 		{
 			const string flowYaml = "general: {debugMode: false}\n";
 			WriteBaseYaml(flowYaml);
 			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
 
-			Assert.Throws<NotSupportedException>(() =>
+			Assert.Throws<InvalidOperationException>(() =>
 				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
 
 			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(flowYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_FlowStyleYamlLocal_ThrowsAndLeavesBothFilesUntouched()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general: {debugMode: false}\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_AnchoredYamlLocal_ThrowsAndLeavesBothFilesUntouched()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general: &shared\n  debugMode: false\nmirror: *shared\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_FlowStyleYamlLocal_MachineTarget_ThrowsAndWritesNothing()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general: {debugMode: false}\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(File.Exists(MachineYamlPath), Is.False);
+			Assert.That(File.Exists(MachinePath), Is.False);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_ToYamlBase_StripsShadowFromYamlLocal_UnrelatedLocalKeysSurvive()
+		{
+			WriteBaseYaml("general:\n  debugMode: false\n");
+			WriteLocalYaml("general:\n  debugMode: false\n  other: keep\n");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true, ""other"": ""keep"" } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo("general:\n  debugMode: true\n"));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo("general:\n  other: keep\n"));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DuplicateKeyYamlLocal_ThrowsNamingLocalFile_AndWritesNothing()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general:\n  debugMode: false\n  debugMode: true\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			var ex = Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(ex.Message, Does.Contain(LocalYamlPath));
+			Assert.That(ex.Message, Does.Not.Contain(BaseYamlPath));
+			Assert.That(ex.InnerException, Is.Not.Null);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_TabIndentedYamlLocal_ThrowsNamingLocalFile_AndWritesNothing()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general:\n\tdebugMode: false\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			var ex = Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(ex.Message, Does.Contain(LocalYamlPath));
+			Assert.That(ex.Message, Does.Not.Contain(BaseYamlPath));
+			Assert.That(ex.InnerException, Is.Not.Null);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_DuplicateKeyYamlLocal_MachineTarget_ThrowsNamingLocalFile_AndWritesNothing()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general:\n  debugMode: false\n  debugMode: true\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			var ex = Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(ex.Message, Does.Contain(LocalYamlPath));
+			Assert.That(ex.Message, Does.Not.Contain(MachineYamlPath));
+			Assert.That(ex.InnerException, Is.Not.Null);
+			Assert.That(File.Exists(MachineYamlPath), Is.False);
+			Assert.That(File.Exists(MachinePath), Is.False);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_TabIndentedYamlLocal_MachineTarget_ThrowsNamingLocalFile_AndWritesNothing()
+		{
+			const string baseYaml = "general:\n  debugMode: false\n";
+			const string localYaml = "general:\n\tdebugMode: false\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			var ex = Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(ex.Message, Does.Contain(LocalYamlPath));
+			Assert.That(ex.Message, Does.Not.Contain(MachineYamlPath));
+			Assert.That(ex.InnerException, Is.Not.Null);
+			Assert.That(File.Exists(MachineYamlPath), Is.False);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_TabIndentedYamlTarget_ThrowsNamingTargetFile_NotLocal()
+		{
+			const string baseYaml = "general:\n\tdebugMode: false\n";
+			const string localYaml = "general:\n  debugMode: false\n";
+			WriteBaseYaml(baseYaml);
+			WriteLocalYaml(localYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			var ex = Assert.Throws<InvalidOperationException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(ex.Message, Does.Contain(BaseYamlPath));
+			Assert.That(ex.Message, Does.Not.Contain(LocalYamlPath));
+			Assert.That(ex.InnerException, Is.Not.Null);
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(baseYaml));
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo(localYaml));
 		}
 	}
 }
