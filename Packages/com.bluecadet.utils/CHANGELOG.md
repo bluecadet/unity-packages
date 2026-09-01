@@ -2,6 +2,15 @@
 
 All notable changes will be documented here.
 
+## [2.1.0](https://github.com/bluecadet/unity-packages/compare/com.bluecadet.utils@2.0.0...com.bluecadet.utils@2.1.0) (2026-09-01)
+
+
+### Added
+
+* **utils:** bundle YamlDotNet 18.1.0 for YAML settings ([1049719](https://github.com/bluecadet/unity-packages/commit/1049719e7a8e0d85d9bd7ba0ef0f90d6c2e944d1))
+* **utils:** load YAML settings tiers ([302a4e0](https://github.com/bluecadet/unity-packages/commit/302a4e07c503bd41ce6c6b959804e28851d3d2e8))
+* **utils:** write YAML tiers preserving comments ([b150988](https://github.com/bluecadet/unity-packages/commit/b150988104f8ef5d47c2ca7ee5f480d258233724))
+
 ## [2.0.0](https://github.com/bluecadet/unity-packages/compare/com.bluecadet.utils@1.2.0...com.bluecadet.utils@2.0.0) (2026-08-07)
 
 
