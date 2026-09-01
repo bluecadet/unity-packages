@@ -57,6 +57,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_NestedDottedPath_CreatesNestedObjects()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var fullValue = JObject.Parse(@"{ ""a"": { ""b"": { ""c"": 5 } } }");
 
 			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "a.b.c" });
@@ -113,6 +115,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_PathMissingFromValue_IsSkipped_OtherPathsStillWritten()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
 
 			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode", "general.notSerialized" });
@@ -125,6 +129,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_ExplicitJsonNull_IsWritten()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var fullValue = JObject.Parse(@"{ ""general"": { ""profile"": null } }");
 
 			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.profile" });
@@ -221,6 +227,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_ArrayLeaf_IsWrittenWholesale()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var fullValue = JObject.Parse(@"{ ""general"": { ""tags"": [""a"", ""b""] } }");
 
 			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.tags" });
@@ -267,6 +275,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_DeepPathToBase_CreatesWholeNestedChain()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var settings = new DeepSettings();
 			settings.app.display.window.fullscreen = true;
 
@@ -401,6 +411,8 @@ namespace Bluecadet.Utils.Tests
 		[Test]
 		public void SaveDirtyPaths_DeepArrayLeaf_IsWrittenWholesale()
 		{
+			// With no Base file on disk a save would now create settings.yaml; pin this test to the JSON write path.
+			WriteBase(@"{}");
 			var settings = new DeepSettings();
 			settings.app.display.window.tags = new[] { "a", "b" };
 
@@ -408,6 +420,139 @@ namespace Bluecadet.Utils.Tests
 
 			JObject written = Read(BasePath);
 			Assert.That(written["app"]["display"]["window"]["tags"].ToObject<string[]>(), Is.EqualTo(new[] { "a", "b" }));
+		}
+
+		// --- YAML tiers ---------------------------------------------------------------------------
+		//
+		// Same tier-write rules as above, but against .yaml files, which are patched as raw text so
+		// their comments survive. Cross-format cases mix a YAML tier with the JSON tiers above.
+
+		private string BaseYamlPath => Path.Combine(_tempDir, "settings.yaml");
+		private string MachineYamlPath => Path.Combine(_tempDir, "settings.TEST-MACHINE.yaml");
+		private string LocalYamlPath => Path.Combine(_tempDir, "settings.local.yaml");
+
+		private void WriteBaseYaml(string yaml) => File.WriteAllText(BaseYamlPath, yaml);
+		private void WriteLocalYaml(string yaml) => File.WriteAllText(LocalYamlPath, yaml);
+
+		[Test]
+		public void SaveDirtyPaths_SparseWriteToYamlBase_PreservesCommentsAndUnrelatedKeys()
+		{
+			WriteBaseYaml(
+				"# header comment\n" +
+				"general:\n" +
+				"  debugMode: false # keep me\n" +
+				"  other: keep\n");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true, ""other"": ""keep"" } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(
+				"# header comment\n" +
+				"general:\n" +
+				"  debugMode: true # keep me\n" +
+				"  other: keep\n"));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_ToYamlBase_StripsShadowFromJsonLocal()
+		{
+			WriteBaseYaml("general:\n  debugMode: false\n");
+			WriteLocal(@"{ ""general"": { ""debugMode"": true, ""other"": ""keep"" } }");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true, ""other"": ""keep"" } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" });
+
+			Assert.That((bool)SettingsFormatIO.Parse(BaseYamlPath)["general"]["debugMode"], Is.True);
+
+			JObject writtenLocal = Read(LocalPath);
+			Assert.That(((JObject)writtenLocal["general"]).ContainsKey("debugMode"), Is.False);
+			Assert.That((string)writtenLocal["general"]["other"], Is.EqualTo("keep"));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_ToYamlLocal_RedundantWithYamlBase_RemovesOverrideAndDeletesFile()
+		{
+			WriteBaseYaml("general:\n  debugMode: true\n");
+			WriteLocalYaml("general:\n  debugMode: true\n");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Local, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.Exists(LocalYamlPath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_NewMachineFile_MatchesYamlBaseExtension()
+		{
+			WriteBaseYaml("general:\n  debugMode: false\n");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.Exists(MachineYamlPath), Is.True);
+			Assert.That(File.Exists(MachinePath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_NewMachineFile_MatchesJsonBaseExtension()
+		{
+			WriteBase(@"{ ""general"": { ""debugMode"": false } }");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.Exists(MachinePath), Is.True);
+			Assert.That(File.Exists(MachineYamlPath), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_NewMachineFile_NoBaseFile_DefaultsToYaml()
+		{
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Machine, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.Exists(MachineYamlPath), Is.True);
+			Assert.That(File.ReadAllText(MachineYamlPath), Is.EqualTo("general:\n  debugMode: true\n"));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_YamlLocalPrunedToWhitespace_DeletesFileAndMeta()
+		{
+			WriteBaseYaml("general:\n  debugMode: false\n");
+			WriteLocalYaml("general:\n  debugMode: true\n");
+			File.WriteAllText(LocalYamlPath + ".meta", "fileFormatVersion: 2\nguid: 00000000000000000000000000000000");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.Exists(LocalYamlPath), Is.False);
+			Assert.That(File.Exists(LocalYamlPath + ".meta"), Is.False);
+		}
+
+		[Test]
+		public void SaveDirtyPaths_YamlLocalPrunedToCommentsOnly_KeepsFile()
+		{
+			WriteBaseYaml("general:\n  debugMode: false\n");
+			WriteLocalYaml("# pinned local note\ngeneral:\n  debugMode: true\n");
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" });
+
+			Assert.That(File.ReadAllText(LocalYamlPath), Is.EqualTo("# pinned local note\n"));
+		}
+
+		[Test]
+		public void SaveDirtyPaths_FlowStyleYamlTarget_ThrowsAndLeavesFileUntouched()
+		{
+			const string flowYaml = "general: {debugMode: false}\n";
+			WriteBaseYaml(flowYaml);
+			var fullValue = JObject.Parse(@"{ ""general"": { ""debugMode"": true } }");
+
+			Assert.Throws<NotSupportedException>(() =>
+				MakeWriter().SaveDirtyPaths(SettingsTier.Base, fullValue, new[] { "general.debugMode" }));
+
+			Assert.That(File.ReadAllText(BaseYamlPath), Is.EqualTo(flowYaml));
 		}
 	}
 }

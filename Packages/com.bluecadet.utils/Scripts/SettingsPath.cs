@@ -110,6 +110,7 @@ namespace Bluecadet.Utils
 
 		public override string ToString() => _dottedPath ?? string.Empty;
 
-		private string[] Segments => (_dottedPath ?? string.Empty).Split('.');
+		/// <summary>The dotted path's individual segments, for callers that walk something other than a <see cref="JObject"/>.</summary>
+		internal string[] Segments => (_dottedPath ?? string.Empty).Split('.');
 	}
 }

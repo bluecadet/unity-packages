@@ -387,7 +387,7 @@ namespace Bluecadet.Utils.Editor
 			foreach (string warning in _cascade.Warnings)
 				EditorGUILayout.HelpBox(warning, MessageType.Warning);
 
-			_showMergedJson = EditorGUILayout.Foldout(_showMergedJson, "Merged JSON (read-only)", true);
+			_showMergedJson = EditorGUILayout.Foldout(_showMergedJson, "Merged Settings (read-only)", true);
 			if (_showMergedJson)
 			{
 				using (new EditorGUI.DisabledScope(true))
@@ -650,7 +650,9 @@ namespace Bluecadet.Utils.Editor
 			}
 			catch (Exception ex)
 			{
-				_editorWarning = $"Could not save {_settingsType.Name} to the {tier} tier: {ex.Message}";
+				// SettingsTierWriter's message already names the file that could not be written and says
+				// whether anything landed, so it reads as its own sentence rather than a trailing clause.
+				_editorWarning = $"Could not save {_settingsType.Name} to the {tier} tier. {ex.Message}";
 				return;
 			}
 
